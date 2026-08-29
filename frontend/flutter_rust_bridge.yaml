@@ -1,5 +1,5 @@
 rust_root: ../engine/bdj_search_ffi
 rust_input: crate::api
 dart_output: lib/core/ffi/
-rust_output: src/frb_generated.rs
+rust_output: ../engine/bdj_search_ffi/src/frb_generated.rs
 web: false

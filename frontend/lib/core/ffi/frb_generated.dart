@@ -81,7 +81,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 abstract class RustLibApi extends BaseApi {
   Future<void> crateApiEngineClose();
 
-  Future<void> crateApiEngineOpen({required String indexDir});
+  Future<void> crateApiEngineOpen({required String indexPathStr});
 
   Future<String> crateApiFullPath({
     required BigInt generation,
@@ -146,12 +146,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "engine_close", argNames: []);
 
   @override
-  Future<void> crateApiEngineOpen({required String indexDir}) {
+  Future<void> crateApiEngineOpen({required String indexPathStr}) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_String(indexDir, serializer);
+          sse_encode_String(indexPathStr, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -164,14 +164,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiEngineOpenConstMeta,
-        argValues: [indexDir],
+        argValues: [indexPathStr],
         apiImpl: this,
       ),
     );
   }
 
   TaskConstMeta get kCrateApiEngineOpenConstMeta =>
-      const TaskConstMeta(debugName: "engine_open", argNames: ["indexDir"]);
+      const TaskConstMeta(debugName: "engine_open", argNames: ["indexPathStr"]);
 
   @override
   Future<String> crateApiFullPath({

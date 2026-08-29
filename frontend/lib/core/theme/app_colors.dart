@@ -9,6 +9,8 @@ class AppColors {
   static const Color background = Color(0xFFFFFFFF); // Lienzo puro
   static const Color surface = Color(0xFFF7F8FA); // Barras, cabeceras
   static const Color surfaceAlt = Color(0xFFFCFCFD); // Filas alternas sutiles
+  static const Color rowOdd = Color(0xFFFFFFFF); // Fila impar (blanco puro)
+  static const Color rowEven = Color(0xFFF9F9FB); // Fila par (gris sutil)
   static const Color hover = Color(0xFFF1F3F7); // Hover de filas y botones
   static const Color selected = Color(0xFFEAE7FF); // Selección (violeta muy claro)
   static const Color border = Color(0xFFE6E8EC); // Separadores suaves de 1px

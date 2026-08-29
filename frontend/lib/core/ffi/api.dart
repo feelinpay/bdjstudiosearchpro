@@ -7,10 +7,12 @@ import 'frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+// These functions are ignored because they are not marked as `pub`: `resolve_default_index_path`
+
 Future<String> ping() => RustLib.instance.api.crateApiPing();
 
-Future<void> engineOpen({required String indexDir}) =>
-    RustLib.instance.api.crateApiEngineOpen(indexDir: indexDir);
+Future<void> engineOpen({required String indexPathStr}) =>
+    RustLib.instance.api.crateApiEngineOpen(indexPathStr: indexPathStr);
 
 Future<void> engineClose() => RustLib.instance.api.crateApiEngineClose();
 
