@@ -1,0 +1,69 @@
+name: macOS Build & CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout Search Pro
+        uses: actions/checkout@v4
+
+      - name: Checkout bdj_license_core
+        uses: actions/checkout@v4
+        with:
+          repository: dzapataba/bdjstudiolicensecore
+          token: ${{ secrets.CORE_TOKEN }}
+          path: bdj_license_core
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          components: clippy
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+
+      - name: Run Engine Tests & Clippy
+        run: |
+          cd engine
+          cargo test --workspace --release
+          cargo clippy --workspace -- -D warnings
+
+      - name: Run Flutter Analyze & Tests
+        run: |
+          cd frontend
+          flutter pub get
+          flutter analyze
+          flutter test
+
+      - name: Build macOS Release
+        run: |
+          cd frontend
+          flutter build macos --release
+
+      - name: Validate Entitlements Isolation
+        run: |
+          ENTITLEMENTS_OUT=$(codesign -d --entitlements :- frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app || true)
+          if echo "$ENTITLEMENTS_OUT" | grep -i -E 'samplepad|stems|wavevideo|synth|voicespot|license'; then
+            echo "ERROR: Entitlements leakage detected across suite apps!"
+            exit 1
+          fi
+
+      - name: Upload macOS Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BDJ_Studio_Search_Pro_macOS
+          path: frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app

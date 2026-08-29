@@ -1,0 +1,19 @@
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryAst {
+    Term(String),
+    Exact(String),
+    Ext(Vec<String>),
+    Size { min: Option<u64>, max: Option<u64> },
+    DateModified { min: Option<u32>, max: Option<u32> },
+    DateCreated { min: Option<u32>, max: Option<u32> },
+    Path(String),
+    Parent(String),
+    FileType(String),
+    Regex(String),
+    Case(String),
+    FileOnly,
+    FolderOnly,
+    And(Vec<QueryAst>),
+    Or(Vec<QueryAst>),
+    Not(Box<QueryAst>),
+}

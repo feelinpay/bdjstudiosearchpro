@@ -1,0 +1,16 @@
+[package]
+name = "bdj_search_ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+bdj_search_core = { path = "../bdj_search_core" }
+bdj_search_ipc = { path = "../bdj_search_ipc" }
+flutter_rust_bridge = "=2.13.0"
+tracing = "0.1"
+parking_lot = "0.12"

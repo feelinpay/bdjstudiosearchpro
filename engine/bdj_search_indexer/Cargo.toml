@@ -1,0 +1,24 @@
+[package]
+name = "bdj_search_indexer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bdj_search_indexer"
+path = "src/main.rs"
+
+[dependencies]
+bdj_search_core = { path = "../bdj_search_core" }
+bdj_search_fs = { path = "../bdj_search_fs" }
+bdj_search_ipc = { path = "../bdj_search_ipc" }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Services"
+] }
