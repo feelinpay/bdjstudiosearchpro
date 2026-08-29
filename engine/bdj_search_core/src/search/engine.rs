@@ -1,10 +1,12 @@
 use super::cancel::CancellationToken;
-use super::matcher::SubstringMatcher;
 use super::refine::RefinementStack;
 use crate::index::view::IndexView;
-use crate::query::{Parser, QueryAst};
+use crate::query::eval::QueryEvaluator;
+use crate::query::Parser;
+use crate::sort::{PermutationSort, RadixSort};
 use rayon::prelude::*;
 use std::sync::Mutex;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchStatus {
@@ -25,7 +27,6 @@ pub struct SearchResult {
 
 pub struct Engine {
     token: CancellationToken,
-    #[allow(dead_code)]
     refine_stack: Mutex<RefinementStack>,
 }
 
@@ -48,25 +49,39 @@ impl Engine {
     }
 
     pub fn cancel_all(&self) -> u64 {
-        self.token.bump()
+        let cancel_gen = self.token.bump();
+        let mut stack = self.refine_stack.lock().unwrap();
+        stack.clear();
+        cancel_gen
     }
 
-    pub fn search(&self, view: &IndexView, query: &str) -> (u64, SearchResult) {
-        let start = std::time::Instant::now();
+    /// Executes high-speed search with incremental refinement and SIMD matching.
+    pub fn search(
+        &self,
+        view: &IndexView,
+        query: &str,
+        sort_col: u8,
+        ascending: bool,
+    ) -> (u64, SearchResult) {
+        let start = Instant::now();
         let search_gen = self.token.bump();
-        let ast = Parser::parse(query);
+        let trimmed = query.trim();
 
-        // Simple single-term substring matching directly from index view
-        let term = match &ast {
-            QueryAst::Term(t) => t.as_str(),
-            QueryAst::Exact(e) => e.as_str(),
-            _ => query,
-        };
+        if trimmed.is_empty() {
+            let total_alive = view.entry_count() as u32;
+            return (
+                search_gen,
+                SearchResult {
+                    entry_ids: Vec::new(),
+                    generation: search_gen,
+                    total_count: total_alive,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            );
+        }
 
-        let matcher = SubstringMatcher::new(term);
+        let ast = Parser::parse(trimmed);
         let count = view.entry_count();
-
-        // If count is 0, return immediately
         if count == 0 {
             return (
                 search_gen,
@@ -79,53 +94,116 @@ impl Engine {
             );
         }
 
-        // Parallel chunk scanning (64k chunks)
-        let chunk_size = 65536;
-        let num_chunks = count.div_ceil(chunk_size);
+        // 1. Check for Incremental Refinement opportunity
+        let candidate_slice = {
+            let stack = self.refine_stack.lock().unwrap();
+            stack.find_candidate(trimmed, &ast).map(|s| s.to_vec())
+        };
 
-        let results: Vec<u32> = (0..num_chunks)
-            .into_par_iter()
-            .flat_map(|chunk_idx| {
-                if self.token.is_cancelled(search_gen) {
-                    return Vec::new();
-                }
+        let mut matched_ids: Vec<u32> = if let Some(candidates) = candidate_slice {
+            // Incremental path: only scan surviving IDs from previous keystroke (< 8 ms!)
+            candidates
+                .into_par_iter()
+                .filter(|&id| {
+                    if self.token.is_cancelled(search_gen) {
+                        return false;
+                    }
+                    let u_idx = id as usize;
+                    if !view.is_alive(u_idx) {
+                        return false;
+                    }
+                    QueryEvaluator::matches(&ast, view, u_idx)
+                })
+                .collect()
+        } else {
+            // Full parallel scan across 64k chunks
+            let chunk_size = 65536;
+            let num_chunks = count.div_ceil(chunk_size);
 
-                let start_idx = chunk_idx * chunk_size;
-                let end_idx = (start_idx + chunk_size).min(count);
-                let mut local = Vec::with_capacity(256);
-
-                for idx in start_idx..end_idx {
-                    // Check alive bitmap
-                    let word_idx = idx / 64;
-                    let bit_idx = idx % 64;
-                    if (view.alive[word_idx] & (1 << bit_idx)) == 0 {
-                        continue;
+            (0..num_chunks)
+                .into_par_iter()
+                .flat_map(|chunk_idx| {
+                    if self.token.is_cancelled(search_gen) {
+                        return Vec::new();
                     }
 
-                    let off = view.name_off[idx] as usize;
-                    let len = view.name_len[idx] as usize;
-                    let name_bytes = &view.name_arena[off..off + len];
-                    let is_non_ascii = (view.flags[idx] & 0x10) != 0;
+                    let start_idx = chunk_idx * chunk_size;
+                    let end_idx = (start_idx + chunk_size).min(count);
+                    let mut local = Vec::with_capacity(256);
 
-                    if matcher.matches(name_bytes, is_non_ascii) {
-                        local.push(idx as u32);
+                    for idx in start_idx..end_idx {
+                        if !view.is_alive(idx) {
+                            continue;
+                        }
+                        if QueryEvaluator::matches(&ast, view, idx) {
+                            local.push(idx as u32);
+                        }
                     }
-                }
-                local
-            })
-            .collect();
+                    local
+                })
+                .collect()
+        };
 
+        if self.token.is_cancelled(search_gen) {
+            return (
+                search_gen,
+                SearchResult {
+                    entry_ids: Vec::new(),
+                    generation: search_gen,
+                    total_count: 0,
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                },
+            );
+        }
+
+        // Cache this result in refinement stack for the next keystroke
+        {
+            let mut stack = self.refine_stack.lock().unwrap();
+            stack.push(trimmed.to_string(), ast.clone(), matched_ids.clone());
+        }
+
+        // 2. Sorting
+        Self::apply_sort(&mut matched_ids, view, sort_col, ascending);
+
+        let total_count = matched_ids.len() as u32;
         let elapsed = start.elapsed().as_millis() as u64;
-        let total_count = results.len() as u32;
 
         (
             search_gen,
             SearchResult {
-                entry_ids: results,
+                entry_ids: matched_ids,
                 generation: search_gen,
                 total_count,
                 elapsed_ms: elapsed,
             },
         )
+    }
+
+    fn apply_sort(ids: &mut [u32], view: &IndexView, sort_col: u8, ascending: bool) {
+        match sort_col {
+            0 => {
+                // Name order: use precomputed name_order permutation
+                let words_needed = view.entry_count().div_ceil(64);
+                let mut bitset = vec![0u64; words_needed];
+                for &id in ids.iter() {
+                    let w = (id / 64) as usize;
+                    let b = id % 64;
+                    bitset[w] |= 1 << b;
+                }
+                let sorted = PermutationSort::sort_by_name_order(&bitset, view.name_order, ascending);
+                ids.copy_from_slice(&sorted[..ids.len()]);
+            }
+            3 => {
+                // Size: Radix sort
+                RadixSort::sort_by_u64_key(ids, view.size, ascending);
+            }
+            4 => {
+                // Date Modified: Radix sort
+                RadixSort::sort_by_u32_key(ids, view.mtime, ascending);
+            }
+            _ => {
+                // Default keep order or natural
+            }
+        }
     }
 }
