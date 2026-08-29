@@ -22,6 +22,12 @@ pub enum IpcEvent {
 
 pub const DEFAULT_PIPE_NAME: &str = r"\\.\pipe\BDJSearchProPipe";
 
+#[cfg(windows)]
+pub mod windows_pipe;
+
+#[cfg(windows)]
+pub use windows_pipe::{PipeClient, PipeServer};
+
 pub fn encode_command(cmd: &IpcCommand) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(cmd)
 }
