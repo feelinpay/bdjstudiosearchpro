@@ -231,3 +231,36 @@ pub fn reveal_in_explorer(generation: u64, row: u32) -> Result<(), String> {
 
     Ok(())
 }
+
+pub struct LicenseInfoFfi {
+    pub is_valid: bool,
+    pub is_trial: bool,
+    pub trial_days_left: u32,
+    pub license_key: Option<String>,
+    pub hwid: String,
+    pub product_id: u32,
+}
+
+pub fn get_license_status() -> LicenseInfoFfi {
+    let info = bdj_search_core::check_license();
+    LicenseInfoFfi {
+        is_valid: info.is_valid,
+        is_trial: info.is_trial,
+        trial_days_left: info.trial_days_left,
+        license_key: info.license_key,
+        hwid: info.hwid,
+        product_id: info.product_id,
+    }
+}
+
+pub fn activate_product_key(key: String) -> Result<LicenseInfoFfi, String> {
+    let info = bdj_search_core::activate_license(&key)?;
+    Ok(LicenseInfoFfi {
+        is_valid: info.is_valid,
+        is_trial: info.is_trial,
+        trial_days_left: info.trial_days_left,
+        license_key: info.license_key,
+        hwid: info.hwid,
+        product_id: info.product_id,
+    })
+}

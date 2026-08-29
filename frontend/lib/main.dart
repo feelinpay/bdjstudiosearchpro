@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/ffi/frb_generated.dart';
 import 'core/theme/app_colors.dart';
 import 'core/theme/app_theme.dart';
+import 'features/license/license_dialog.dart';
 import 'features/search/providers/search_provider.dart';
 import 'features/search/widgets/filter_bar.dart';
 import 'features/search/widgets/status_bar.dart';
@@ -174,6 +175,12 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
                         ref.read(searchProvider.notifier).searchFiles('');
                       },
                     ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.key_rounded, size: 18, color: AppColors.primary),
+                    tooltip: 'Licencia y Activación (HWID V2)',
+                    onPressed: () => LicenseDialog.show(context),
+                  ),
                 ],
               ),
             ),

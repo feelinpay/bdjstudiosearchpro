@@ -48,6 +48,51 @@ Future<void> revealInExplorer({required BigInt generation, required int row}) =>
       row: row,
     );
 
+Future<LicenseInfoFfi> getLicenseStatus() =>
+    RustLib.instance.api.crateApiGetLicenseStatus();
+
+Future<LicenseInfoFfi> activateProductKey({required String key}) =>
+    RustLib.instance.api.crateApiActivateProductKey(key: key);
+
+class LicenseInfoFfi {
+  final bool isValid;
+  final bool isTrial;
+  final int trialDaysLeft;
+  final String? licenseKey;
+  final String hwid;
+  final int productId;
+
+  const LicenseInfoFfi({
+    required this.isValid,
+    required this.isTrial,
+    required this.trialDaysLeft,
+    this.licenseKey,
+    required this.hwid,
+    required this.productId,
+  });
+
+  @override
+  int get hashCode =>
+      isValid.hashCode ^
+      isTrial.hashCode ^
+      trialDaysLeft.hashCode ^
+      licenseKey.hashCode ^
+      hwid.hashCode ^
+      productId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is LicenseInfoFfi &&
+          runtimeType == other.runtimeType &&
+          isValid == other.isValid &&
+          isTrial == other.isTrial &&
+          trialDaysLeft == other.trialDaysLeft &&
+          licenseKey == other.licenseKey &&
+          hwid == other.hwid &&
+          productId == other.productId;
+}
+
 class RowBatchFfi {
   final BigInt generation;
   final int offset;
