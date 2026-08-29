@@ -1,0 +1,28 @@
+#!/bin/bash
+# Script de post-instalación para BDJ Studio Search Pro en macOS
+set -e
+
+DAEMON_PLIST="/Library/LaunchDaemons/com.bdjstudio.searchpro.indexer.plist"
+INSTALL_DIR="/Library/Application Support/BDJ Studio/Search Pro"
+LOG_DIR="/Library/Logs/BDJ Studio"
+
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$LOG_DIR"
+chmod 755 "$LOG_DIR"
+
+# Copiar el LaunchDaemon si se incluye en el payload
+if [ -f "$INSTALL_DIR/com.bdjstudio.searchpro.indexer.plist" ]; then
+    cp "$INSTALL_DIR/com.bdjstudio.searchpro.indexer.plist" "$DAEMON_PLIST"
+fi
+
+# Configurar permisos de seguridad requeridos por macOS launchd
+chown root:wheel "$DAEMON_PLIST"
+chmod 644 "$DAEMON_PLIST"
+
+# Detener versión previa si estaba en ejecución
+launchctl bootout system/com.bdjstudio.searchpro.indexer 2>/dev/null || true
+
+# Registrar e iniciar el daemon en segundo plano
+launchctl bootstrap system "$DAEMON_PLIST"
+
+exit 0

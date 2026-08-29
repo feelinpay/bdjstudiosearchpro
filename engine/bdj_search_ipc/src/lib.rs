@@ -28,6 +28,12 @@ pub mod windows_pipe;
 #[cfg(windows)]
 pub use windows_pipe::{PipeClient, PipeServer};
 
+#[cfg(unix)]
+pub mod unix_socket;
+
+#[cfg(unix)]
+pub use unix_socket::{UnixSocketClient, UnixSocketServer, DEFAULT_UNIX_SOCKET_PATH};
+
 pub fn encode_command(cmd: &IpcCommand) -> Result<Vec<u8>, postcard::Error> {
     postcard::to_allocvec(cmd)
 }
