@@ -81,7 +81,7 @@ impl Engine {
 
         // Parallel chunk scanning (64k chunks)
         let chunk_size = 65536;
-        let num_chunks = (count + chunk_size - 1) / chunk_size;
+        let num_chunks = count.div_ceil(chunk_size);
 
         let results: Vec<u32> = (0..num_chunks)
             .into_par_iter()

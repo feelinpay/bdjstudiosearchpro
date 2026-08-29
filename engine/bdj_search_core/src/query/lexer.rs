@@ -46,7 +46,7 @@ impl<'a> Lexer<'a> {
                 '"' => {
                     self.chars.next();
                     let mut s = String::new();
-                    while let Some(ch) = self.chars.next() {
+                    for ch in self.chars.by_ref() {
                         if ch == '"' {
                             break;
                         }

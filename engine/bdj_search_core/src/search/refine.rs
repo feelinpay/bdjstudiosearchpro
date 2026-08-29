@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub struct RefinementStack {
     stack: Vec<(String, Vec<u32>)>,
 }

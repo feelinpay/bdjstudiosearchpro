@@ -11,7 +11,7 @@ impl RadixSort {
         if ascending {
             pairs.sort_unstable_by_key(|p| p.0);
         } else {
-            pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            pairs.sort_unstable_by_key(|p| std::cmp::Reverse(p.0));
         }
 
         for (i, p) in pairs.into_iter().enumerate() {
@@ -29,7 +29,7 @@ impl RadixSort {
         if ascending {
             pairs.sort_unstable_by_key(|p| p.0);
         } else {
-            pairs.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+            pairs.sort_unstable_by_key(|p| std::cmp::Reverse(p.0));
         }
 
         for (i, p) in pairs.into_iter().enumerate() {
