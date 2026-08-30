@@ -14,6 +14,19 @@ Future<String> ping() => RustLib.instance.api.crateApiPing();
 Future<void> engineOpen({required String indexPathStr}) =>
     RustLib.instance.api.crateApiEngineOpen(indexPathStr: indexPathStr);
 
+/// Vuelve a mapear el indice si el servicio ha publicado una version nueva.
+///
+/// Devuelve `true` cuando algo cambio, para que la interfaz repita la consulta
+/// en curso. Sin esto el cliente mapeaba el indice una sola vez al arrancar y
+/// no volvia a enterarse de nada: por muy al dia que estuviera el servicio, la
+/// aplicacion seguia mostrando la foto del arranque.
+Future<bool> reloadIfChanged() =>
+    RustLib.instance.api.crateApiReloadIfChanged();
+
+/// Generacion del indice actualmente mapeado, para diagnostico.
+Future<BigInt> indexGeneration() =>
+    RustLib.instance.api.crateApiIndexGeneration();
+
 Future<void> engineClose() => RustLib.instance.api.crateApiEngineClose();
 
 Future<BigInt> search({
@@ -47,51 +60,6 @@ Future<void> revealInExplorer({required BigInt generation, required int row}) =>
       generation: generation,
       row: row,
     );
-
-Future<LicenseInfoFfi> getLicenseStatus() =>
-    RustLib.instance.api.crateApiGetLicenseStatus();
-
-Future<LicenseInfoFfi> activateProductKey({required String key}) =>
-    RustLib.instance.api.crateApiActivateProductKey(key: key);
-
-class LicenseInfoFfi {
-  final bool isValid;
-  final bool isTrial;
-  final int trialDaysLeft;
-  final String? licenseKey;
-  final String hwid;
-  final int productId;
-
-  const LicenseInfoFfi({
-    required this.isValid,
-    required this.isTrial,
-    required this.trialDaysLeft,
-    this.licenseKey,
-    required this.hwid,
-    required this.productId,
-  });
-
-  @override
-  int get hashCode =>
-      isValid.hashCode ^
-      isTrial.hashCode ^
-      trialDaysLeft.hashCode ^
-      licenseKey.hashCode ^
-      hwid.hashCode ^
-      productId.hashCode;
-
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is LicenseInfoFfi &&
-          runtimeType == other.runtimeType &&
-          isValid == other.isValid &&
-          isTrial == other.isTrial &&
-          trialDaysLeft == other.trialDaysLeft &&
-          licenseKey == other.licenseKey &&
-          hwid == other.hwid &&
-          productId == other.productId;
-}
 
 class RowBatchFfi {
   final BigInt generation;

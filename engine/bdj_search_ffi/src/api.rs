@@ -2,6 +2,7 @@ use bdj_search_core::index::MmapIndex;
 use bdj_search_core::search::{Engine, SearchResult};
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
 pub struct SearchStatusFfi {
@@ -27,6 +28,9 @@ pub struct RowBatchFfi {
 static ENGINE: LazyLock<Engine> = LazyLock::new(Engine::new);
 static MMAP_INDEX: Mutex<Option<MmapIndex>> = Mutex::new(None);
 static LAST_SEARCH: Mutex<Option<SearchResult>> = Mutex::new(None);
+/// Ruta y generacion del indice mapeado, para detectar republicaciones.
+static INDEX_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+static INDEX_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub fn ping() -> String {
     "pong from BDJ Search Pro Rust Engine".to_string()
@@ -74,17 +78,64 @@ pub fn engine_open(index_path_str: String) -> Result<(), String> {
     // Validate header and sections
     let _ = mmap.view().map_err(|e| format!("Formato de índice inválido: {:?}", e))?;
 
+    let generation = mmap.view().map(|v| v.header.generation).unwrap_or(0);
+
     let mut guard = MMAP_INDEX.lock();
     *guard = Some(mmap);
+    drop(guard);
+
+    *INDEX_PATH.lock() = Some(path);
+    INDEX_GENERATION.store(generation, Ordering::SeqCst);
 
     Ok(())
 }
 
+/// Vuelve a mapear el indice si el servicio ha publicado una version nueva.
+///
+/// Devuelve `true` cuando algo cambio, para que la interfaz repita la consulta
+/// en curso. Sin esto el cliente mapeaba el indice una sola vez al arrancar y
+/// no volvia a enterarse de nada: por muy al dia que estuviera el servicio, la
+/// aplicacion seguia mostrando la foto del arranque.
+pub fn reload_if_changed() -> bool {
+    let path = match INDEX_PATH.lock().clone() {
+        Some(p) => p,
+        None => return false,
+    };
+
+    // Leer la cabecera cuesta microsegundos; se puede sondear sin coste.
+    let Ok(mmap) = MmapIndex::open(&path) else {
+        return false;
+    };
+    let Ok(view) = mmap.view() else {
+        return false;
+    };
+    let generation = view.header.generation;
+
+    if generation == INDEX_GENERATION.load(Ordering::SeqCst) {
+        return false;
+    }
+
+    INDEX_GENERATION.store(generation, Ordering::SeqCst);
+    *MMAP_INDEX.lock() = Some(mmap);
+
+    // La pila de refinamiento y el ultimo resultado guardan identificadores del
+    // indice anterior. Tras un renumerado apuntarian a archivos equivocados.
+    ENGINE.cancel_all();
+    *LAST_SEARCH.lock() = None;
+
+    true
+}
+
+/// Generacion del indice actualmente mapeado, para diagnostico.
+pub fn index_generation() -> u64 {
+    INDEX_GENERATION.load(Ordering::SeqCst)
+}
+
 pub fn engine_close() {
-    let mut guard = MMAP_INDEX.lock();
-    *guard = None;
-    let mut search_guard = LAST_SEARCH.lock();
-    *search_guard = None;
+    *MMAP_INDEX.lock() = None;
+    *LAST_SEARCH.lock() = None;
+    *INDEX_PATH.lock() = None;
+    INDEX_GENERATION.store(0, Ordering::SeqCst);
 }
 
 pub fn search(query: String, sort_col: u8, ascending: bool) -> u64 {
@@ -147,13 +198,9 @@ pub fn rows(generation: u64, offset: u32, count: u32) -> RowBatchFfi {
                 for &id in slice {
                     let u_idx = id as usize;
                     names.push(view.get_name(u_idx).unwrap_or("").to_string());
-                    let parent_id = view.parent[u_idx];
-                    let parent_path = if parent_id != u32::MAX {
-                        view.resolve_full_path(parent_id as usize)
-                    } else {
-                        view.resolve_full_path(u_idx)
-                    };
-                    paths.push(parent_path);
+                    // Columna "Ruta": la carpeta contenedora, no la ruta del
+                    // propio archivo, que ya se ve en la columna "Nombre".
+                    paths.push(view.resolve_parent_path(u_idx));
                     extensions.push(view.get_extension(u_idx).to_string());
                     sizes.push(view.size[u_idx]);
                     mtimes.push(view.mtime[u_idx]);
@@ -230,37 +277,4 @@ pub fn reveal_in_explorer(generation: u64, row: u32) -> Result<(), String> {
     }
 
     Ok(())
-}
-
-pub struct LicenseInfoFfi {
-    pub is_valid: bool,
-    pub is_trial: bool,
-    pub trial_days_left: u32,
-    pub license_key: Option<String>,
-    pub hwid: String,
-    pub product_id: u32,
-}
-
-pub fn get_license_status() -> LicenseInfoFfi {
-    let info = bdj_search_core::check_license();
-    LicenseInfoFfi {
-        is_valid: info.is_valid,
-        is_trial: info.is_trial,
-        trial_days_left: info.trial_days_left,
-        license_key: info.license_key,
-        hwid: info.hwid,
-        product_id: info.product_id,
-    }
-}
-
-pub fn activate_product_key(key: String) -> Result<LicenseInfoFfi, String> {
-    let info = bdj_search_core::activate_license(&key)?;
-    Ok(LicenseInfoFfi {
-        is_valid: info.is_valid,
-        is_trial: info.is_trial,
-        trial_days_left: info.trial_days_left,
-        license_key: info.license_key,
-        hwid: info.hwid,
-        product_id: info.product_id,
-    })
 }

@@ -4,14 +4,46 @@ import '../../../core/theme/app_colors.dart';
 import '../models/file_row.dart';
 import '../providers/search_provider.dart';
 
-class VirtualizedTable extends ConsumerWidget {
+class VirtualizedTable extends ConsumerStatefulWidget {
   const VirtualizedTable({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<VirtualizedTable> createState() => _VirtualizedTableState();
+}
+
+class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_scrollController.hasClients) {
+      final maxScroll = _scrollController.position.maxScrollExtent;
+      final currentScroll = _scrollController.position.pixels;
+      // Disparar carga cuando queden menos de 400 px para el final
+      if (maxScroll - currentScroll <= 400) {
+        ref.read(searchProvider.notifier).loadMoreRows();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final searchState = ref.watch(searchProvider);
     final notifier = ref.read(searchProvider.notifier);
     final rows = searchState.visibleRows;
+    final totalItems = rows.length + (searchState.isLoadingMore ? 1 : 0);
 
     return Column(
       children: [
@@ -39,9 +71,22 @@ class VirtualizedTable extends ConsumerWidget {
           child: rows.isEmpty
               ? _buildEmptyState(searchState)
               : ListView.builder(
+                  controller: _scrollController,
                   itemExtent: 32.0, // Fixed 32 px per row for 60 fps virtualization
-                  itemCount: rows.length,
+                  itemCount: totalItems,
                   itemBuilder: (context, index) {
+                    if (index >= rows.length) {
+                      return const Center(
+                        child: SizedBox(
+                          height: 14,
+                          width: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2.0,
+                            color: AppColors.primary,
+                          ),
+                        ),
+                      );
+                    }
                     final row = rows[index];
                     final isSelected = index == searchState.selectedIndex;
                     return _buildRow(row, index, isSelected, notifier);

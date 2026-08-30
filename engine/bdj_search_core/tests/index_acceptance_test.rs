@@ -6,37 +6,51 @@ use tempfile::NamedTempFile;
 
 #[test]
 fn test_index_build_mmap_and_path_resolution() {
+    // El corpus reproduce la forma real de un volumen: una raiz sin nombre, las
+    // carpetas colgando de ella y los archivos dentro. Modelar las carpetas como
+    // raices, que es lo que hacia la version anterior de esta prueba, ocultaba
+    // que las rutas salian mal.
     let count = 100_000usize;
-    let mut builder = IndexBuilder::with_capacity(count);
-    builder.vol_table.add_or_update(
-        if cfg!(windows) { "D:\\" } else { "/Volumes/Music" },
-        "SSD Música",
-        "NTFS",
-        true,
-    );
+    let mount = if cfg!(windows) { "D:\\" } else { "/Volumes/Music" };
+    let sep = if mount.contains('\\') { '\\' } else { '/' };
+    // "D:\\" ya termina en separador; "/Volumes/Music" no. El prefijo de montaje
+    // puede venir de cualquiera de las dos formas segun la plataforma.
+    let join = |base: &str, seg: &str| -> String {
+        if base.ends_with('\\') || base.ends_with('/') {
+            format!("{base}{seg}")
+        } else {
+            format!("{base}{sep}{seg}")
+        }
+    };
 
-    // Create 100 directories
+    let mut builder = IndexBuilder::with_capacity(count);
+    builder.vol_table.add_or_update(mount, "SSD Musica", "NTFS", true);
+
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    assert_eq!(root, 0);
+
+    // 100 carpetas bajo la raiz del volumen: indices 1..=100
     for i in 0..100 {
         builder.add_entry(
-            u32::MAX,
+            root,
             &format!("Dir_{}", i),
             true,
             false,
             false,
             0,
             0,
-            1700000000 + i as u32,
-            1700000000,
+            1_700_000_000 + i as u32,
+            1_700_000_000,
         );
     }
 
-    // Create remaining files inside directories
+    let first_file = 101usize;
     let mut expected_names = Vec::with_capacity(count);
     let mut expected_parents = Vec::with_capacity(count);
     let mut expected_sizes = Vec::with_capacity(count);
 
-    for i in 100..count {
-        let parent_id = (i % 100) as u32;
+    for i in first_file..count {
+        let parent_id = 1 + ((i - first_file) % 100) as u32;
         let name = format!("Track_{:06}.wav", i);
         let size = (i as u64) * 1024;
         expected_names.push(name.clone());
@@ -51,12 +65,11 @@ fn test_index_build_mmap_and_path_resolution() {
             false,
             0,
             size,
-            1700000000 + (i % 1000) as u32,
-            1700000000,
+            1_700_000_000 + (i % 1000) as u32,
+            1_700_000_000,
         );
     }
 
-    // Write to temporary file
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path();
 
@@ -65,53 +78,157 @@ fn test_index_build_mmap_and_path_resolution() {
     let mut writer = BufWriter::with_capacity(2 * 1024 * 1024, file);
     builder.write_to(&mut writer).unwrap();
     drop(writer);
-    let write_time = write_start.elapsed();
-    println!("Wrote {} entries in {:?}", count, write_time);
+    println!("Escritas {} entradas en {:?}", count, write_start.elapsed());
 
-    // Test Acceptance Criteria: Open index via mmap in < 100 ms
     let open_start = Instant::now();
-    let mmap_index = MmapIndex::open(path).expect("MmapIndex::open should succeed");
-    let view = mmap_index.view().expect("view() should parse correctly");
+    let mmap_index = MmapIndex::open(path).expect("MmapIndex::open deberia funcionar");
+    let view = mmap_index.view().expect("view() deberia validar el formato");
     let open_time = open_start.elapsed();
-    println!("Mmap open + header validation took: {:?}", open_time);
+    println!("Apertura mmap + validacion: {:?}", open_time);
     assert!(
         open_time.as_millis() < 100,
-        "Apertura del índice debe ser < 100 ms, tomó {:?}",
+        "La apertura del indice debe ser < 100 ms, tomo {:?}",
         open_time
     );
 
     assert_eq!(view.entry_count(), count);
 
-    // Verify sample of 1,000 random entries
+    // La raiz del volumen resuelve exactamente al prefijo de montaje, sin
+    // repetirlo como segmento.
+    assert_eq!(view.resolve_full_path(0), mount);
+    assert_eq!(
+        view.resolve_full_path(1),
+        join(mount, "Dir_0"),
+        "una carpeta de primer nivel no debe duplicar el prefijo del volumen"
+    );
+
     let mut rng = rand::thread_rng();
     for _ in 0..1000 {
-        let idx = rng.gen_range(100..count);
-        let exp_name = &expected_names[idx - 100];
-        let exp_size = expected_sizes[idx - 100];
-        let exp_parent = expected_parents[idx - 100];
+        let idx = rng.gen_range(first_file..count);
+        let exp_name = &expected_names[idx - first_file];
+        let exp_size = expected_sizes[idx - first_file];
+        let exp_parent = expected_parents[idx - first_file];
 
         assert_eq!(view.get_name(idx), Some(exp_name.as_str()));
         assert_eq!(view.get_extension(idx), "wav");
         assert_eq!(view.size[idx], exp_size);
         assert_eq!(view.parent[idx], exp_parent);
 
-        let resolved_path = view.resolve_full_path(idx);
-        let expected_parent_name = format!("Dir_{}", exp_parent);
-        assert!(
-            resolved_path.contains(&expected_parent_name),
-            "Resolved path '{}' should contain parent '{}'",
-            resolved_path,
-            expected_parent_name
+        // Igualdad exacta, no `contains`: es lo que detecta un prefijo repetido.
+        let parent_path = join(mount, &format!("Dir_{}", exp_parent - 1));
+        let expected_path = format!("{}{}{}", parent_path, sep, exp_name);
+        assert_eq!(
+            view.resolve_full_path(idx),
+            expected_path,
+            "ruta completa incorrecta para la entrada {}",
+            idx
         );
-        assert!(
-            resolved_path.ends_with(exp_name),
-            "Resolved path '{}' should end with track name '{}'",
-            resolved_path,
-            exp_name
+        assert_eq!(
+            view.resolve_parent_path(idx),
+            parent_path,
+            "ruta de la carpeta contenedora incorrecta para la entrada {}",
+            idx
         );
     }
 
-    println!("Random sample of 1,000 entries verified successfully!");
+    println!("Muestra aleatoria de 1.000 entradas verificada.");
+}
+
+#[test]
+fn test_path_resolution_survives_corrupted_parents() {
+    // Un indice con un ciclo en la columna `parent` no debe colgar el proceso.
+    let mut builder = IndexBuilder::new();
+    builder.vol_table.add_or_update("C:\\", "Sistema", "NTFS", true);
+
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    let a = builder.add_entry(root, "A", true, false, false, 0, 0, 0, 0);
+    let b = builder.add_entry(a, "B", true, false, false, 0, 0, 0, 0);
+    // Ciclo deliberado: A pasa a colgar de B.
+    builder.parents[a as usize] = b;
+
+    let temp_file = NamedTempFile::new().unwrap();
+    let file = std::fs::File::create(temp_file.path()).unwrap();
+    let mut writer = BufWriter::new(file);
+    builder.write_to(&mut writer).unwrap();
+    drop(writer);
+
+    let mmap_index = MmapIndex::open(temp_file.path()).unwrap();
+    let view = mmap_index.view().unwrap();
+
+    // Basta con que termine: sin el tope de profundidad esto no retornaria.
+    let resolved = view.resolve_full_path(b as usize);
+    assert!(resolved.len() < 4096, "la ruta resuelta debe estar acotada");
+}
+
+#[test]
+fn test_set_parent_rejects_self_reference() {
+    let mut builder = IndexBuilder::new();
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    let a = builder.add_entry(root, "A", true, false, false, 0, 0, 0, 0);
+
+    // El registro raiz de NTFS se declara padre de si mismo.
+    builder.set_parent(a, a);
+    assert_eq!(
+        builder.parent_of(a),
+        u32::MAX,
+        "una entrada nunca debe quedar como padre de si misma"
+    );
+}
+
+#[test]
+fn test_truncate_undoes_a_partial_scan() {
+    let mut builder = IndexBuilder::new();
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    let base = builder.count() as u32;
+
+    for i in 0..200 {
+        builder.add_entry(root, &format!("f{}.wav", i), false, false, false, 0, 0, 0, 0);
+    }
+    assert_eq!(builder.count(), 201);
+
+    builder.truncate_to(base);
+    assert_eq!(builder.count(), 1, "solo debe quedar la raiz");
+
+    // El indice truncado sigue siendo valido y no arrastra entradas vivas.
+    let temp_file = NamedTempFile::new().unwrap();
+    let file = std::fs::File::create(temp_file.path()).unwrap();
+    let mut writer = BufWriter::new(file);
+    builder.write_to(&mut writer).unwrap();
+    drop(writer);
+
+    let mmap_index = MmapIndex::open(temp_file.path()).unwrap();
+    let view = mmap_index.view().unwrap();
+    assert_eq!(view.entry_count(), 1);
+    assert!(view.is_alive(0));
+}
+
+#[test]
+fn test_metadata_is_filled_in_a_second_pass() {
+    // Reproduce la fase 2: la MFT deja tamano y fechas en cero y el recorrido
+    // de directorios los completa despues.
+    let mut builder = IndexBuilder::new();
+    builder.vol_table.add_or_update("C:\\", "Sistema", "NTFS", true);
+
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    let dir = builder.add_entry(root, "Music", true, false, false, 0, 0, 0, 0);
+    let file = builder.add_entry(dir, "set.wav", false, false, false, 0, 0, 0, 0);
+
+    assert_eq!(builder.sizes[file as usize], 0);
+    builder.set_metadata(file, 52_428_800, 1_755_000_000, 1_754_000_000);
+    builder.set_attributes(file, true, false);
+
+    assert_eq!(builder.sizes[file as usize], 52_428_800);
+    assert_eq!(builder.mtimes[file as usize], 1_755_000_000);
+    assert_eq!(builder.resolve_path(file, "C:\\"), "C:\\Music\\set.wav");
+
+    // Agrupado por carpeta: es como la fase 2 recorre cada directorio una vez.
+    let pairs = builder.children_by_parent();
+    assert!(pairs.contains(&(dir, file)));
+    assert!(pairs.contains(&(root, dir)));
+    assert!(
+        !pairs.iter().any(|&(p, _)| p == u32::MAX),
+        "la raiz del volumen no tiene padre y no debe aparecer agrupada"
+    );
 }
 
 #[test]
@@ -119,56 +236,100 @@ fn test_compaction_with_tombstones_and_updates() {
     let temp_file = NamedTempFile::new().unwrap();
     let path = temp_file.path();
 
-    // 1. Initial base index
+    // 1. Base: C:\ -> Musica\ -> {Song_A.mp3, Song_B.flac}
     let mut builder = IndexBuilder::new();
-    builder.add_entry(u32::MAX, "RootFolder", true, false, false, 0, 0, 100, 100);
-    builder.add_entry(0, "Song_A.mp3", false, false, false, 0, 1000, 100, 100);
-    builder.add_entry(0, "Song_B.flac", false, false, false, 0, 2000, 100, 100);
+    builder.vol_table.add_or_update("C:\\", "Sistema", "NTFS", true);
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+    let musica = builder.add_entry(root, "Musica", true, false, false, 0, 0, 100, 100);
+    let song_a = builder.add_entry(musica, "Song_A.mp3", false, false, false, 0, 1000, 100, 100);
+    builder.add_entry(musica, "Song_B.flac", false, false, false, 0, 2000, 100, 100);
 
     let file = std::fs::File::create(path).unwrap();
     let mut writer = BufWriter::new(file);
     builder.write_to(&mut writer).unwrap();
     drop(writer);
 
-    // 2. Open base and prepare overlay
     let mmap_base = MmapIndex::open(path).unwrap();
-    let mut overlay = OverlayIndex::new();
+    let base_count = mmap_base.view().unwrap().entry_count() as u32;
 
-    // Delete Song_A (ID 1)
-    overlay.mark_deleted(1);
-    // Add Song_C in overlay
-    overlay.add_entry(0, "Song_C.wav", false, false, false, 0, 3000, 200, 200);
+    // 2. La capa de cambios se ancla al base: sin eso, sus identificadores no
+    //    significan nada y las lapidas se descartan en silencio.
+    let mut overlay = OverlayIndex::with_base_count(base_count);
+    overlay.mark_deleted(song_a);
+    overlay.add_entry(musica, "Song_C.wav", false, false, false, 0, 3000, 200, 200);
+    assert_eq!(overlay.tombstone_count(), 1);
+    assert!(overlay.has_changes());
 
-    // 3. Compact
     overlay.compact(Some(&mmap_base), path, 2).unwrap();
 
-    // 4. Verify compacted index
+    // 3. Resultado: raiz, Musica, Song_B y Song_C.
     let mmap_compacted = MmapIndex::open(path).unwrap();
     let view = mmap_compacted.view().unwrap();
 
-    assert_eq!(view.entry_count(), 3); // RootFolder, Song_B and Song_C present
+    assert_eq!(view.entry_count(), 4);
     assert_eq!(view.header.generation, 2);
-    assert_eq!(view.get_name(0), Some("RootFolder"));
-    assert_eq!(view.get_name(1), Some("Song_B.flac"));
-    assert_eq!(view.get_name(2), Some("Song_C.wav"));
-    assert_eq!(view.get_name(3), None);
+
+    let names: Vec<&str> = (0..view.entry_count())
+        .filter_map(|i| view.get_name(i))
+        .collect();
+    assert!(!names.contains(&"Song_A.mp3"), "la entrada borrada no debe sobrevivir");
+    assert!(names.contains(&"Song_B.flac"));
+    assert!(names.contains(&"Song_C.wav"));
+
+    // Lo que de verdad importa: los supervivientes siguen en su carpeta pese al
+    // renumerado, y la nueva entrada aterriza en la carpeta correcta.
+    for wanted in ["Song_B.flac", "Song_C.wav"] {
+        let idx = (0..view.entry_count())
+            .find(|&i| view.get_name(i) == Some(wanted))
+            .unwrap();
+        assert_eq!(
+            view.resolve_full_path(idx),
+            format!("C:\\Musica\\{}", wanted)
+        );
+    }
+
+    // Y la capa queda anclada al indice recien publicado.
+    assert_eq!(overlay.base_count, 4);
+    assert!(!overlay.has_changes());
 }
 
 #[test]
 fn test_1m_index_open_latency_and_budget() {
     let count = 1_000_000usize;
     let mut builder = IndexBuilder::with_capacity(count);
+    builder.vol_table.add_or_update("C:\\", "Sistema", "NTFS", true);
 
-    // Build 1M entries
-    for i in 0..count {
-        let is_dir = i < 500;
-        let parent = if is_dir { u32::MAX } else { (i % 500) as u32 };
-        let name = if is_dir {
-            format!("Folder_{}", i)
-        } else {
-            format!("DJ_Track_{:07}.wav", i)
-        };
-        builder.add_entry(parent, &name, is_dir, false, false, 0, 1024 * 1024 * 10, 1700000000, 1700000000);
+    let root = builder.add_entry(u32::MAX, "", true, false, false, 0, 0, 0, 0);
+
+    // 500 carpetas bajo la raiz, indices 1..=500
+    for i in 0..500 {
+        builder.add_entry(
+            root,
+            &format!("Folder_{}", i),
+            true,
+            false,
+            false,
+            0,
+            0,
+            1_700_000_000,
+            1_700_000_000,
+        );
+    }
+
+    let first_file = 501usize;
+    for i in first_file..count {
+        let parent = 1 + ((i - first_file) % 500) as u32;
+        builder.add_entry(
+            parent,
+            &format!("DJ_Track_{:07}.wav", i),
+            false,
+            false,
+            false,
+            0,
+            10 * 1024 * 1024,
+            1_700_000_000,
+            1_700_000_000,
+        );
     }
 
     let temp_file = NamedTempFile::new().unwrap();
@@ -179,33 +340,37 @@ fn test_1m_index_open_latency_and_budget() {
     let mut writer = BufWriter::with_capacity(4 * 1024 * 1024, file);
     let bytes_written = builder.write_to(&mut writer).unwrap();
     drop(writer);
-    println!("1M Index: wrote {} bytes ({:.2} MB) in {:?}", bytes_written, bytes_written as f64 / 1_048_576.0, write_start.elapsed());
+    println!(
+        "Indice de 1M: {} bytes ({:.2} MB) escritos en {:?}",
+        bytes_written,
+        bytes_written as f64 / 1_048_576.0,
+        write_start.elapsed()
+    );
 
-    // Acceptance criterion: mmap open in < 100 ms
     let open_start = Instant::now();
-    let mmap_index = MmapIndex::open(path).expect("MmapIndex 1M should open");
-    let view = mmap_index.view().expect("1M view parse should succeed");
+    let mmap_index = MmapIndex::open(path).expect("el indice de 1M deberia abrirse");
+    let view = mmap_index.view().expect("el formato de 1M deberia validar");
     let open_time = open_start.elapsed();
-    println!("1M Index: mmap open + validation took: {:?}", open_time);
+    println!("Indice de 1M: apertura mmap + validacion en {:?}", open_time);
 
     assert!(
         open_time.as_millis() < 100,
-        "Apertura del índice de 1M debe ser < 100 ms, tomó {:?}",
+        "La apertura del indice de 1M debe ser < 100 ms, tomo {:?}",
         open_time
     );
 
     assert_eq!(view.entry_count(), count);
-    assert_eq!(view.get_name(0), Some("Folder_0"));
+    assert_eq!(view.get_name(1), Some("Folder_0"));
     assert_eq!(view.get_name(999_999), Some("DJ_Track_0999999.wav"));
     assert_eq!(view.get_extension(999_999), "wav");
 
-    // Verify 1,000 random path resolutions
+    // Mil rutas al azar, comprobadas por igualdad exacta contra lo esperado.
     let mut rng = rand::thread_rng();
     for _ in 0..1000 {
-        let idx = rng.gen_range(500..count);
-        let path = view.resolve_full_path(idx);
-        assert!(path.contains("Folder_"));
-        assert!(path.ends_with(".wav"));
+        let idx = rng.gen_range(first_file..count);
+        let folder = (idx - first_file) % 500;
+        let expected = format!("C:\\Folder_{}\\DJ_Track_{:07}.wav", folder, idx);
+        assert_eq!(view.resolve_full_path(idx), expected);
     }
-    println!("1M Index: 1,000 paths verified successfully!");
+    println!("Indice de 1M: 1.000 rutas verificadas.");
 }

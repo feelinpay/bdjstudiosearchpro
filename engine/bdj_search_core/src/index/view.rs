@@ -184,26 +184,46 @@ impl<'a> IndexView<'a> {
         self.ext_table.get_name(self.ext_id[idx]).unwrap_or("")
     }
 
-    /// Resolves full path on the fly by walking up `parent` indices.
-    /// Never stores duplicated full path strings in memory or disk.
+    /// Profundidad máxima al reconstruir una ruta.
+    ///
+    /// Ni NTFS ni APFS admiten jerarquías tan hondas, así que superarla solo
+    /// puede significar que la columna `parent` tiene un ciclo. Sin este tope,
+    /// un índice corrupto colgaría el proceso y agotaría la memoria.
+    pub const MAX_PATH_DEPTH: usize = 128;
+
+    /// Reconstruye la ruta completa subiendo por `parent`.
+    ///
+    /// La raíz del volumen no aporta segmento: su nombre ya está representado
+    /// por el prefijo de montaje de la tabla de volúmenes. Incluirla producía
+    /// rutas duplicadas del tipo `C:\C:\archivo.wav`.
     pub fn resolve_full_path(&self, idx: usize) -> String {
         if idx >= self.entry_count() {
             return String::new();
         }
 
-        let mut segments: Vec<&str> = Vec::with_capacity(8);
+        let mut segments: Vec<&str> = Vec::with_capacity(16);
         let mut curr = idx as u32;
         let vol_id = self.volume[idx];
 
-        while curr != u32::MAX {
+        for _ in 0..Self::MAX_PATH_DEPTH {
             let u_idx = curr as usize;
             if u_idx >= self.entry_count() {
                 break;
             }
-            if let Some(name) = self.get_name(u_idx) {
+            let parent = self.parent[u_idx];
+            // `parent == u32::MAX` marca la raíz del volumen: no se añade.
+            if parent == u32::MAX {
+                break;
+            }
+            if let Some(name) = self.get_name(u_idx)
+                && !name.is_empty()
+            {
                 segments.push(name);
             }
-            curr = self.parent[u_idx];
+            if parent == curr {
+                break; // autorreferencia: índice corrupto
+            }
+            curr = parent;
         }
 
         let mount_prefix = self
@@ -212,20 +232,34 @@ impl<'a> IndexView<'a> {
             .map(|v| v.mount_prefix.as_str())
             .unwrap_or(if cfg!(windows) { "C:\\" } else { "/" });
 
+        let sep = if mount_prefix.contains('\\') || cfg!(windows) {
+            '\\'
+        } else {
+            '/'
+        };
+
         let mut path = String::with_capacity(mount_prefix.len() + 128);
         path.push_str(mount_prefix);
 
-        for (i, seg) in segments.iter().rev().enumerate() {
-            if i > 0 || !path.ends_with('\\') && !path.ends_with('/') {
-                if cfg!(windows) {
-                    path.push('\\');
-                } else {
-                    path.push('/');
-                }
+        for seg in segments.iter().rev() {
+            if !path.ends_with('\\') && !path.ends_with('/') {
+                path.push(sep);
             }
             path.push_str(seg);
         }
 
         path
+    }
+
+    /// Ruta de la carpeta que contiene a `idx`, para la columna «Ruta».
+    pub fn resolve_parent_path(&self, idx: usize) -> String {
+        if idx >= self.entry_count() {
+            return String::new();
+        }
+        let parent = self.parent[idx];
+        if parent == u32::MAX {
+            return self.resolve_full_path(idx);
+        }
+        self.resolve_full_path(parent as usize)
     }
 }

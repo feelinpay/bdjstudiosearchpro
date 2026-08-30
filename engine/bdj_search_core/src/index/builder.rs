@@ -123,6 +123,172 @@ impl IndexBuilder {
         self.parents.len()
     }
 
+    /// Reasigna el padre de una entrada ya insertada.
+    ///
+    /// La enumeración de la MFT entrega los registros en orden arbitrario: un
+    /// archivo puede aparecer antes que su carpeta. Por eso se insertan todos
+    /// con un padre provisional y se corrigen en una segunda pasada, cuando ya
+    /// existe el mapa completo de números de referencia a índices.
+    pub fn set_parent(&mut self, idx: u32, parent: u32) {
+        let i = idx as usize;
+        if i < self.parents.len() {
+            // Un padre que es uno mismo produciría un ciclo al resolver la ruta.
+            self.parents[i] = if parent == idx { u32::MAX } else { parent };
+        }
+    }
+
+    /// Rellena tamaño y fechas en la segunda fase del indexado.
+    ///
+    /// `FSCTL_ENUM_USN_DATA` entrega nombres y jerarquía en segundos, pero no
+    /// trae ni tamaño ni fechas; esas llegan después recorriendo directorios.
+    pub fn set_metadata(&mut self, idx: u32, size: u64, mtime: u32, ctime: u32) {
+        let i = idx as usize;
+        if i < self.sizes.len() {
+            self.sizes[i] = size;
+            self.mtimes[i] = mtime;
+            self.ctimes[i] = ctime;
+        }
+    }
+
+    pub fn set_attributes(&mut self, idx: u32, is_hidden: bool, is_system: bool) {
+        let i = idx as usize;
+        if i >= self.flags.len() {
+            return;
+        }
+        let mut flag = self.flags[i];
+        if is_hidden {
+            flag |= super::layout::FLAG_HIDDEN;
+        } else {
+            flag &= !super::layout::FLAG_HIDDEN;
+        }
+        if is_system {
+            flag |= super::layout::FLAG_SYSTEM;
+        } else {
+            flag &= !super::layout::FLAG_SYSTEM;
+        }
+        self.flags[i] = flag;
+    }
+
+    pub fn name_at(&self, idx: u32) -> &str {
+        let i = idx as usize;
+        if i >= self.name_offs.len() {
+            return "";
+        }
+        let off = self.name_offs[i] as usize;
+        let len = self.name_lens[i] as usize;
+        std::str::from_utf8(&self.arena.as_slice()[off..off + len]).unwrap_or("")
+    }
+
+    pub fn is_dir(&self, idx: u32) -> bool {
+        let i = idx as usize;
+        i < self.flags.len() && (self.flags[i] & FLAG_DIR) != 0
+    }
+
+    /// Descarta las entradas a partir de `len`.
+    ///
+    /// Sirve para deshacer un escaneo que fallo a medias: sin esto, caer al
+    /// recorrido de directorios despues de una lectura parcial de la MFT
+    /// duplicaria en el indice todo lo que si se habia leido.
+    ///
+    /// Los nombres ya escritos siguen en la arena, sin que nadie los referencie.
+    /// Es memoria desperdiciada, no corrupcion, y solo ocurre en un fallo.
+    pub fn truncate_to(&mut self, len: u32) {
+        let n = (len as usize).min(self.parents.len());
+        self.parents.truncate(n);
+        self.name_offs.truncate(n);
+        self.name_lens.truncate(n);
+        self.flags.truncate(n);
+        self.ext_ids.truncate(n);
+        self.volumes.truncate(n);
+        self.sizes.truncate(n);
+        self.mtimes.truncate(n);
+        self.ctimes.truncate(n);
+        self.name_order.truncate(n);
+
+        let words = n.div_ceil(64);
+        self.alive.truncate(words);
+        // Apaga los bits sobrantes de la ultima palabra.
+        if !n.is_multiple_of(64)
+            && let Some(last) = self.alive.last_mut()
+        {
+            let keep = n % 64;
+            *last &= (1u64 << keep) - 1;
+        }
+    }
+
+    pub fn volume_of(&self, idx: u32) -> u8 {
+        let i = idx as usize;
+        if i < self.volumes.len() {
+            self.volumes[i]
+        } else {
+            0
+        }
+    }
+
+    pub fn parent_of(&self, idx: u32) -> u32 {
+        let i = idx as usize;
+        if i < self.parents.len() {
+            self.parents[i]
+        } else {
+            u32::MAX
+        }
+    }
+
+    /// Reconstruye la ruta de una entrada durante la construcción del índice.
+    ///
+    /// Aplica el mismo criterio que `IndexView::resolve_full_path`: la raíz del
+    /// volumen no aporta segmento porque ya está en el prefijo de montaje.
+    pub fn resolve_path(&self, idx: u32, mount_prefix: &str) -> String {
+        let mut segments: Vec<&str> = Vec::with_capacity(16);
+        let mut curr = idx;
+
+        for _ in 0..super::view::IndexView::MAX_PATH_DEPTH {
+            let i = curr as usize;
+            if i >= self.parents.len() {
+                break;
+            }
+            let parent = self.parents[i];
+            if parent == u32::MAX {
+                break;
+            }
+            let name = self.name_at(curr);
+            if !name.is_empty() {
+                segments.push(name);
+            }
+            if parent == curr {
+                break;
+            }
+            curr = parent;
+        }
+
+        let sep = if mount_prefix.contains('\\') { '\\' } else { '/' };
+        let mut path = String::with_capacity(mount_prefix.len() + 128);
+        path.push_str(mount_prefix);
+        for seg in segments.iter().rev() {
+            if !path.ends_with('\\') && !path.ends_with('/') {
+                path.push(sep);
+            }
+            path.push_str(seg);
+        }
+        path
+    }
+
+    /// Agrupa las entradas por carpeta contenedora, ordenadas por padre.
+    ///
+    /// Es lo que permite recorrer cada directorio del disco una sola vez en la
+    /// segunda fase, en lugar de abrir un identificador por archivo.
+    pub fn children_by_parent(&self) -> Vec<(u32, u32)> {
+        let mut pairs: Vec<(u32, u32)> = self
+            .parents
+            .iter()
+            .enumerate()
+            .filter(|&(_, &p)| p != u32::MAX)
+            .map(|(i, &p)| (p, i as u32))
+            .collect();
+        pairs.par_sort_unstable();
+        pairs
+    }
+
     /// Sorts `name_order` in parallel using Rayon for O(N) query time ordering.
     pub fn compute_name_order(&mut self) {
         let arena_bytes = self.arena.as_slice();

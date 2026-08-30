@@ -170,7 +170,13 @@ impl UsnScanner {
         Ok(cursor)
     }
 
-    /// Read incremental journal changes since `last_usn` using FSCTL_READ_USN_JOURNAL
+    /// Lee los cambios del diario desde `last_usn` y devuelve el nuevo cursor.
+    ///
+    /// Repite la llamada hasta agotar el diario: un solo `DeviceIoControl` cabe
+    /// en 64 KB, que son unos pocos cientos de registros. Copiar una carpeta de
+    /// 500 pistas genera muchos mas, y quedarse en el primer buffer dejaba el
+    /// resto de los cambios sin ver hasta el siguiente sondeo, o para siempre si
+    /// el diario daba la vuelta.
     pub fn read_changes<F>(
         &self,
         journal_id: u64,
@@ -180,73 +186,84 @@ impl UsnScanner {
     where
         F: FnMut(UsnRecord),
     {
-        let read_data = READ_USN_JOURNAL_DATA_V0 {
-            StartUsn: last_usn,
-            ReasonMask: 0xFFFFFFFF,
-            ReturnOnlyOnClose: 0,
-            Timeout: 0,
-            BytesToWaitFor: 0,
-            UsnJournalID: journal_id,
-        };
-
         let mut buffer = vec![0u8; 64 * 1024];
-        let mut bytes_returned = 0u32;
+        let mut cursor = last_usn;
 
-        unsafe {
-            DeviceIoControl(
-                self.handle,
-                FSCTL_READ_USN_JOURNAL,
-                Some(&read_data as *const _ as *const _),
-                std::mem::size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
-                Some(buffer.as_mut_ptr() as *mut _),
-                buffer.len() as u32,
-                Some(&mut bytes_returned),
-                None,
-            )?;
-        }
+        loop {
+            let read_data = READ_USN_JOURNAL_DATA_V0 {
+                StartUsn: cursor,
+                ReasonMask: 0xFFFFFFFF,
+                ReturnOnlyOnClose: 0,
+                Timeout: 0,
+                BytesToWaitFor: 0,
+                UsnJournalID: journal_id,
+            };
 
-        if bytes_returned < 8 {
-            return Ok(last_usn);
-        }
+            let mut bytes_returned = 0u32;
+            unsafe {
+                DeviceIoControl(
+                    self.handle,
+                    FSCTL_READ_USN_JOURNAL,
+                    Some(&read_data as *const _ as *const _),
+                    std::mem::size_of::<READ_USN_JOURNAL_DATA_V0>() as u32,
+                    Some(buffer.as_mut_ptr() as *mut _),
+                    buffer.len() as u32,
+                    Some(&mut bytes_returned),
+                    None,
+                )?;
+            }
 
-        let next_usn = i64::from_le_bytes(buffer[0..8].try_into().unwrap());
-        let mut offset = 8usize;
-
-        while offset + std::mem::size_of::<USN_RECORD_V2>() <= bytes_returned as usize {
-            let rec_ptr = buffer[offset..].as_ptr() as *const USN_RECORD_V2;
-            let rec = unsafe { &*rec_ptr };
-            let rec_len = rec.RecordLength as usize;
-            if rec_len == 0 {
+            // Solo la cabecera: no queda nada por leer.
+            if bytes_returned <= 8 {
                 break;
             }
 
-            let name_offset = offset + rec.FileNameOffset as usize;
-            let name_bytes_len = rec.FileNameLength as usize;
+            let next_usn = i64::from_le_bytes(buffer[0..8].try_into().unwrap());
+            let mut offset = 8usize;
 
-            if name_offset + name_bytes_len <= bytes_returned as usize {
-                let u16_slice = unsafe {
-                    std::slice::from_raw_parts(
-                        buffer[name_offset..].as_ptr() as *const u16,
-                        name_bytes_len / 2,
-                    )
-                };
-                let name = OsString::from_wide(u16_slice).to_string_lossy().to_string();
-                let is_dir = (rec.FileAttributes & 0x10) != 0;
+            while offset + std::mem::size_of::<USN_RECORD_V2>() <= bytes_returned as usize {
+                let rec_ptr = buffer[offset..].as_ptr() as *const USN_RECORD_V2;
+                let rec = unsafe { &*rec_ptr };
+                let rec_len = rec.RecordLength as usize;
+                if rec_len == 0 {
+                    break;
+                }
 
-                callback(UsnRecord {
-                    file_ref: rec.FileReferenceNumber,
-                    parent_file_ref: rec.ParentFileReferenceNumber,
-                    usn: rec.Usn,
-                    reason: rec.Reason,
-                    attributes: rec.FileAttributes,
-                    name,
-                    is_dir,
-                });
+                let name_offset = offset + rec.FileNameOffset as usize;
+                let name_bytes_len = rec.FileNameLength as usize;
+
+                if name_offset + name_bytes_len <= bytes_returned as usize {
+                    let u16_slice = unsafe {
+                        std::slice::from_raw_parts(
+                            buffer[name_offset..].as_ptr() as *const u16,
+                            name_bytes_len / 2,
+                        )
+                    };
+                    let name = OsString::from_wide(u16_slice).to_string_lossy().to_string();
+                    let is_dir = (rec.FileAttributes & 0x10) != 0;
+
+                    callback(UsnRecord {
+                        file_ref: rec.FileReferenceNumber,
+                        parent_file_ref: rec.ParentFileReferenceNumber,
+                        usn: rec.Usn,
+                        reason: rec.Reason,
+                        attributes: rec.FileAttributes,
+                        name,
+                        is_dir,
+                    });
+                }
+
+                offset += rec_len;
             }
 
-            offset += rec_len;
+            // Sin avance no hay progreso posible: se corta para no girar en vacio.
+            if next_usn <= cursor {
+                cursor = next_usn;
+                break;
+            }
+            cursor = next_usn;
         }
 
-        Ok(next_usn)
+        Ok(cursor)
     }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/ffi/api.dart' as ffi;
@@ -14,6 +16,7 @@ class SearchState {
   final int elapsedMs;
   final int selectedIndex;
   final bool isIndexLoaded;
+  final bool isLoadingMore;
   final List<FileRow> visibleRows;
 
   const SearchState({
@@ -27,10 +30,12 @@ class SearchState {
     this.elapsedMs = 0,
     this.selectedIndex = 0,
     this.isIndexLoaded = false,
+    this.isLoadingMore = false,
     this.visibleRows = const [],
   });
 
   BigInt get effectiveGeneration => generation ?? BigInt.zero;
+  bool get hasMore => visibleRows.length < readyCount;
 
   SearchState copyWith({
     String? query,
@@ -43,6 +48,7 @@ class SearchState {
     int? elapsedMs,
     int? selectedIndex,
     bool? isIndexLoaded,
+    bool? isLoadingMore,
     List<FileRow>? visibleRows,
   }) {
     return SearchState(
@@ -56,6 +62,7 @@ class SearchState {
       elapsedMs: elapsedMs ?? this.elapsedMs,
       selectedIndex: selectedIndex ?? this.selectedIndex,
       isIndexLoaded: isIndexLoaded ?? this.isIndexLoaded,
+      isLoadingMore: isLoadingMore ?? this.isLoadingMore,
       visibleRows: visibleRows ?? this.visibleRows,
     );
   }
@@ -66,15 +73,51 @@ class SearchNotifier extends StateNotifier<SearchState> {
     initEngine();
   }
 
+  /// Cada cuánto se comprueba si el servicio publicó un índice nuevo.
+  ///
+  /// Solo se lee la cabecera del archivo, que son microsegundos; la consulta
+  /// únicamente se repite cuando la generación cambió de verdad.
+  static const _reloadInterval = Duration(seconds: 1);
+
+  Timer? _reloadTimer;
+
   Future<void> initEngine() async {
     try {
       await ffi.engineOpen(indexPathStr: '');
       state = state.copyWith(isIndexLoaded: true);
-      // Run initial search
       await searchFiles('');
+      _startWatchingIndex();
     } catch (_) {
       state = state.copyWith(isIndexLoaded: false);
     }
+  }
+
+  /// Mantiene la lista al día cuando cambian los archivos del disco.
+  ///
+  /// El servicio republica el índice al calmarse la actividad; sin este sondeo
+  /// la aplicación seguiría mostrando el estado del arranque por muy al día que
+  /// estuviera el índice en disco.
+  void _startWatchingIndex() {
+    _reloadTimer?.cancel();
+    _reloadTimer = Timer.periodic(_reloadInterval, (_) async {
+      if (!mounted) return;
+      try {
+        final changed = await ffi.reloadIfChanged();
+        if (changed && mounted) {
+          // Los identificadores del resultado anterior apuntan al índice viejo,
+          // así que la consulta se repite entera en vez de refrescar filas.
+          await searchFiles(state.query);
+        }
+      } catch (_) {
+        // Un fallo puntual al remapear no debe tumbar la interfaz.
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _reloadTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> searchFiles(String q) async {
@@ -160,6 +203,37 @@ class SearchNotifier extends StateNotifier<SearchState> {
     searchFiles(state.query);
   }
 
+  Future<void> loadMoreRows() async {
+    if (state.isLoadingMore || !state.hasMore) return;
+
+    state = state.copyWith(isLoadingMore: true);
+    try {
+      final gen = state.effectiveGeneration;
+      final offset = state.visibleRows.length;
+      final batch = await ffi.rows(generation: gen, offset: offset, count: 200);
+
+      final moreRows = <FileRow>[];
+      for (var i = 0; i < batch.count; i++) {
+        moreRows.add(FileRow(
+          index: batch.offset + i,
+          name: batch.names[i],
+          path: batch.paths[i],
+          extension: batch.extensions[i],
+          size: batch.sizes[i].toInt(),
+          mtime: batch.mtimes[i],
+          flags: batch.flags[i],
+        ));
+      }
+
+      state = state.copyWith(
+        visibleRows: [...state.visibleRows, ...moreRows],
+        isLoadingMore: false,
+      );
+    } catch (_) {
+      state = state.copyWith(isLoadingMore: false);
+    }
+  }
+
   void selectRow(int index) {
     if (index >= 0 && index < state.visibleRows.length) {
       state = state.copyWith(selectedIndex: index);
@@ -169,6 +243,16 @@ class SearchNotifier extends StateNotifier<SearchState> {
   void selectNext() {
     if (state.selectedIndex < state.visibleRows.length - 1) {
       state = state.copyWith(selectedIndex: state.selectedIndex + 1);
+      // Carga proactiva si nos acercamos al final de la ventana
+      if (state.selectedIndex >= state.visibleRows.length - 30 && state.hasMore) {
+        loadMoreRows();
+      }
+    } else if (state.hasMore) {
+      loadMoreRows().then((_) {
+        if (state.selectedIndex < state.visibleRows.length - 1) {
+          state = state.copyWith(selectedIndex: state.selectedIndex + 1);
+        }
+      });
     }
   }
 

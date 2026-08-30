@@ -1,8 +1,7 @@
 use super::cancel::CancellationToken;
 use super::refine::RefinementStack;
 use crate::index::view::IndexView;
-use crate::query::eval::QueryEvaluator;
-use crate::query::Parser;
+use crate::query::{CompiledQueryAst, Parser};
 use crate::sort::{PermutationSort, RadixSort};
 use rayon::prelude::*;
 use std::sync::Mutex;
@@ -94,6 +93,8 @@ impl Engine {
             );
         }
 
+        let compiled_ast = CompiledQueryAst::compile(&ast);
+
         // 1. Check for Incremental Refinement opportunity
         let candidate_slice = {
             let stack = self.refine_stack.lock().unwrap();
@@ -112,7 +113,7 @@ impl Engine {
                     if !view.is_alive(u_idx) {
                         return false;
                     }
-                    QueryEvaluator::matches(&ast, view, u_idx)
+                    compiled_ast.matches(view, u_idx)
                 })
                 .collect()
         } else {
@@ -135,7 +136,7 @@ impl Engine {
                         if !view.is_alive(idx) {
                             continue;
                         }
-                        if QueryEvaluator::matches(&ast, view, idx) {
+                        if compiled_ast.matches(view, idx) {
                             local.push(idx as u32);
                         }
                     }
@@ -182,16 +183,22 @@ impl Engine {
     fn apply_sort(ids: &mut [u32], view: &IndexView, sort_col: u8, ascending: bool) {
         match sort_col {
             0 => {
-                // Name order: use precomputed name_order permutation
-                let words_needed = view.entry_count().div_ceil(64);
-                let mut bitset = vec![0u64; words_needed];
-                for &id in ids.iter() {
-                    let w = (id / 64) as usize;
-                    let b = id % 64;
-                    bitset[w] |= 1 << b;
+                // Name order:
+                // Fast path: for small result sets (< 1000), sort in-place with zero bitset allocation
+                if ids.len() < 1000 {
+                    PermutationSort::sort_in_place_small(ids, view, ascending);
+                } else {
+                    // For large result sets, use precomputed name_order permutation
+                    let words_needed = view.entry_count().div_ceil(64);
+                    let mut bitset = vec![0u64; words_needed];
+                    for &id in ids.iter() {
+                        let w = (id / 64) as usize;
+                        let b = id % 64;
+                        bitset[w] |= 1 << b;
+                    }
+                    let sorted = PermutationSort::sort_by_name_order(&bitset, view.name_order, ascending, ids.len());
+                    ids.copy_from_slice(&sorted[..ids.len()]);
                 }
-                let sorted = PermutationSort::sort_by_name_order(&bitset, view.name_order, ascending);
-                ids.copy_from_slice(&sorted[..ids.len()]);
             }
             3 => {
                 // Size: Radix sort

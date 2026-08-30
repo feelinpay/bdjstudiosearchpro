@@ -71,6 +71,6 @@ mod tests {
         let decoded = VolumeTable::decode(&encoded).unwrap();
 
         assert_eq!(decoded.get(c_id).unwrap().label, "Sistema");
-        assert_eq!(decoded.get(usb_id).unwrap().is_connected, false);
+        assert!(!decoded.get(usb_id).unwrap().is_connected);
     }
 }

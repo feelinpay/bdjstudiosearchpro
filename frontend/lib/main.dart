@@ -1,10 +1,19 @@
+import 'dart:io';
+
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hotkey_manager/hotkey_manager.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:window_manager/window_manager.dart';
+
 import 'core/ffi/frb_generated.dart';
 import 'core/theme/app_colors.dart';
 import 'core/theme/app_theme.dart';
-import 'features/license/license_dialog.dart';
+import 'features/licensing/presentation/providers/license_providers.dart';
+import 'features/licensing/presentation/screens/activation_screen.dart';
+import 'features/licensing/presentation/screens/license_info_sheet.dart';
 import 'features/search/providers/search_provider.dart';
 import 'features/search/widgets/filter_bar.dart';
 import 'features/search/widgets/status_bar.dart';
@@ -17,6 +26,16 @@ Future<void> main() async {
   } catch (e) {
     debugPrint('RustLib init note: $e');
   }
+
+  if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+    try {
+      await windowManager.ensureInitialized();
+      await hotKeyManager.unregisterAll();
+    } catch (e) {
+      debugPrint('Desktop window/hotkey manager init note: $e');
+    }
+  }
+
   runApp(const ProviderScope(child: SearchProApp()));
 }
 
@@ -29,10 +48,104 @@ class SearchProApp extends StatelessWidget {
       title: 'BDJ Studio Search Pro',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
-      home: const SearchHomeScreen(),
+      home: const LicenseGate(),
     );
   }
 }
+
+/// Portón de licencia: nada de la aplicación se construye antes de que la
+/// verificación SPP3 haya terminado con éxito.
+///
+/// Es deliberado que `SearchHomeScreen` solo exista en la rama `licensed`: su
+/// provider abre el índice al construirse, y no queremos que un equipo sin
+/// licencia llegue siquiera a mapearlo.
+class LicenseGate extends ConsumerStatefulWidget {
+  const LicenseGate({super.key});
+
+  @override
+  ConsumerState<LicenseGate> createState() => _LicenseGateState();
+}
+
+class _LicenseGateState extends ConsumerState<LicenseGate>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Revalidación al volver del segundo plano: detecta el retroceso de reloj y
+    // las licencias caducadas sin necesidad de reiniciar la aplicación.
+    if (state == AppLifecycleState.resumed) {
+      final notifier = ref.read(licenseProvider.notifier);
+      if (ref.read(licenseProvider).loadingState ==
+          LicenseLoadingState.licensed) {
+        notifier.sync();
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final licenseState = ref.watch(licenseProvider);
+
+    switch (licenseState.loadingState) {
+      case LicenseLoadingState.initial:
+      case LicenseLoadingState.loading:
+        return const _SplashScreen();
+      case LicenseLoadingState.licensed:
+        return const SearchHomeScreen();
+      case LicenseLoadingState.unlicensed:
+      case LicenseLoadingState.error:
+        return const ActivationScreen();
+    }
+  }
+}
+
+class _SplashScreen extends StatelessWidget {
+  const _SplashScreen();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: AppColors.background,
+      body: Center(
+        child: SizedBox(
+          height: 26,
+          width: 26,
+          child: CircularProgressIndicator(
+            strokeWidth: 2.4,
+            color: AppColors.primary,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Atajos Alt + 1..8 de los filtros rápidos.
+///
+/// No puede ser `const`: `LogicalKeyboardKey` redefine `==` y `hashCode`, y Dart
+/// prohíbe esos tipos como clave de un mapa constante. Al ser una constante de
+/// nivel de archivo se construye una sola vez, no en cada pulsación.
+final Map<LogicalKeyboardKey, String> _quickFilters = {
+  LogicalKeyboardKey.digit1: 'Todos',
+  LogicalKeyboardKey.digit2: 'Audio',
+  LogicalKeyboardKey.digit3: 'Proyectos DJ',
+  LogicalKeyboardKey.digit4: 'Vídeo',
+  LogicalKeyboardKey.digit5: 'Imagen',
+  LogicalKeyboardKey.digit6: 'Documentos',
+  LogicalKeyboardKey.digit7: 'Comprimidos',
+  LogicalKeyboardKey.digit8: 'Carpetas',
+};
 
 class SearchHomeScreen extends ConsumerStatefulWidget {
   const SearchHomeScreen({super.key});
@@ -41,15 +154,88 @@ class SearchHomeScreen extends ConsumerStatefulWidget {
   ConsumerState<SearchHomeScreen> createState() => _SearchHomeScreenState();
 }
 
-class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
+class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
+    with TrayListener {
   final TextEditingController _queryController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
+  bool _isDragging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    trayManager.addListener(this);
+    _initDesktopServices();
+  }
 
   @override
   void dispose() {
+    trayManager.removeListener(this);
     _queryController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
+  }
+
+  Future<void> _initDesktopServices() async {
+    if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) return;
+
+    try {
+      // Atajo global: Alt + Espacio para invocar Search Pro al primer plano
+      final hotKey = HotKey(
+        key: PhysicalKeyboardKey.space,
+        modifiers: [HotKeyModifier.alt],
+        scope: HotKeyScope.system,
+      );
+      await hotKeyManager.register(
+        hotKey,
+        keyDownHandler: (hotKey) async {
+          final isFocused = await windowManager.isFocused();
+          if (isFocused) {
+            await windowManager.hide();
+          } else {
+            await windowManager.show();
+            await windowManager.focus();
+            _searchFocusNode.requestFocus();
+          }
+        },
+      );
+    } catch (e) {
+      debugPrint('HotKey init note: $e');
+    }
+
+    try {
+      final menu = Menu(
+        items: [
+          MenuItem(
+            key: 'show_window',
+            label: 'Abrir BDJ Studio Search Pro',
+          ),
+          MenuItem.separator(),
+          MenuItem(
+            key: 'exit_app',
+            label: 'Salir',
+          ),
+        ],
+      );
+      await trayManager.setContextMenu(menu);
+    } catch (e) {
+      debugPrint('Tray init note: $e');
+    }
+  }
+
+  @override
+  void onTrayIconMouseDown() {
+    windowManager.show();
+    windowManager.focus();
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    if (menuItem.key == 'show_window') {
+      windowManager.show();
+      windowManager.focus();
+    } else if (menuItem.key == 'exit_app') {
+      exit(0);
+    }
   }
 
   void _handleKeyEvent(KeyEvent event) {
@@ -59,62 +245,37 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
     final isAlt = HardwareKeyboard.instance.isAltPressed;
     final isControl = HardwareKeyboard.instance.isControlPressed ||
         HardwareKeyboard.instance.isMetaPressed;
-    final isShift = HardwareKeyboard.instance.isShiftPressed;
 
-    // Alt + 1..8: Quick Category Filter shortcuts (§9.3)
+    // Alt + 1..8: filtros rápidos de categoría
     if (isAlt) {
-      if (event.logicalKey == LogicalKeyboardKey.digit1) {
-        notifier.setFilter('Todos');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit2) {
-        notifier.setFilter('Audio');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit3) {
-        notifier.setFilter('Proyectos DJ');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit4) {
-        notifier.setFilter('Vídeo');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit5) {
-        notifier.setFilter('Imagen');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit6) {
-        notifier.setFilter('Documentos');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit7) {
-        notifier.setFilter('Comprimidos');
-        return;
-      } else if (event.logicalKey == LogicalKeyboardKey.digit8) {
-        notifier.setFilter('Carpetas');
+      final filter = _quickFilters[event.logicalKey];
+      if (filter != null) {
+        notifier.setFilter(filter);
         return;
       }
     }
 
-    // Ctrl + C / Cmd + C: Copy path (§11.1)
+    // Ctrl / Cmd + C: copiar la ruta completa
     if (isControl && event.logicalKey == LogicalKeyboardKey.keyC) {
       notifier.copySelectedPath();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Ruta copiada al portapapeles'),
-          duration: Duration(milliseconds: 1200),
-        ),
-      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Ruta copiada al portapapeles'),
+            duration: Duration(milliseconds: 1200),
+          ),
+        );
       return;
     }
 
-    // Table keyboard navigation
     if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
       notifier.selectNext();
     } else if (event.logicalKey == LogicalKeyboardKey.arrowUp) {
       notifier.selectPrev();
     } else if (event.logicalKey == LogicalKeyboardKey.enter) {
-      if (isShift) {
-        // Shift + Enter: Reveal in Explorer / Finder
-        notifier.revealSelected();
-      } else {
-        // Enter: Open file or reveal
-        notifier.revealSelected();
-      }
+      // Abre la ubicación del archivo seleccionado en el Explorador o el Finder.
+      notifier.revealSelected();
     } else if (event.logicalKey == LogicalKeyboardKey.escape) {
       if (_queryController.text.isNotEmpty) {
         _queryController.clear();
@@ -133,7 +294,6 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
         backgroundColor: AppColors.background,
         body: Column(
           children: [
-            // Search Input Header
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               decoration: const BoxDecoration(
@@ -142,7 +302,8 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
               ),
               child: Row(
                 children: [
-                  const Icon(Icons.search_rounded, color: AppColors.primary, size: 22),
+                  const Icon(Icons.search_rounded,
+                      color: AppColors.primary, size: 22),
                   const SizedBox(width: 12),
                   Expanded(
                     child: TextField(
@@ -155,21 +316,22 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
                         fontWeight: FontWeight.w500,
                       ),
                       decoration: const InputDecoration(
-                        hintText:
-                            'Buscar archivos instantáneamente (ej: michael jackson ext:wav tam:>10mb)...',
-                        hintStyle: TextStyle(color: AppColors.textDisabled, fontSize: 13),
+                        hintText: 'Buscar archivos instantáneamente '
+                            '(ej: michael jackson ext:wav tam:>10mb)...',
+                        hintStyle: TextStyle(
+                            color: AppColors.textDisabled, fontSize: 13),
                         border: InputBorder.none,
                         isDense: true,
                       ),
                       onChanged: (val) {
-                        // 0ms debounce: live instantaneous query evaluation (< 8 ms in Rust)
                         ref.read(searchProvider.notifier).searchFiles(val);
                       },
                     ),
                   ),
                   if (_queryController.text.isNotEmpty)
                     IconButton(
-                      icon: const Icon(Icons.clear, size: 18, color: AppColors.textSecondary),
+                      icon: const Icon(Icons.clear,
+                          size: 18, color: AppColors.textSecondary),
                       onPressed: () {
                         _queryController.clear();
                         ref.read(searchProvider.notifier).searchFiles('');
@@ -177,23 +339,66 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen> {
                     ),
                   const SizedBox(width: 4),
                   IconButton(
-                    icon: const Icon(Icons.key_rounded, size: 18, color: AppColors.primary),
-                    tooltip: 'Licencia y Activación (HWID V2)',
-                    onPressed: () => LicenseDialog.show(context),
+                    icon: const Icon(Icons.verified_user_outlined,
+                        size: 18, color: AppColors.textSecondary),
+                    tooltip: 'Licencia',
+                    onPressed: () => LicenseInfoSheet.show(context),
                   ),
                 ],
               ),
             ),
-
-            // Filter Chips Bar (Alt + 1..8)
             const FilterBar(),
-
-            // High-density Virtualized Table
-            const Expanded(
-              child: VirtualizedTable(),
+            Expanded(
+              child: DropTarget(
+                onDragDone: (detail) {
+                  if (detail.files.isNotEmpty) {
+                    final path = detail.files.first.path;
+                    final query = 'ruta:"$path"';
+                    _queryController.text = query;
+                    ref.read(searchProvider.notifier).searchFiles(query);
+                  }
+                },
+                onDragEntered: (_) => setState(() => _isDragging = true),
+                onDragExited: (_) => setState(() => _isDragging = false),
+                child: Stack(
+                  children: [
+                    const VirtualizedTable(),
+                    if (_isDragging)
+                      Container(
+                        color: AppColors.primary.withAlpha(40),
+                        child: Center(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 24, vertical: 16),
+                            decoration: BoxDecoration(
+                              color: AppColors.surface,
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                  color: AppColors.primary, width: 2),
+                            ),
+                            child: const Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.folder_open_rounded,
+                                    color: AppColors.primary, size: 24),
+                                SizedBox(width: 12),
+                                Text(
+                                  'Soltar carpeta para buscar dentro de ella',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: AppColors.textPrimary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
-
-            // Reactive Status Bar
             const SearchStatusBar(),
           ],
         ),

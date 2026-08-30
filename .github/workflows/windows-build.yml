@@ -1,4 +1,4 @@
-name: macOS Build & CI
+name: Windows Build & CI
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-macos:
-    runs-on: macos-15
+  build-windows:
+    runs-on: windows-latest
 
     steps:
       - name: Checkout Search Pro
@@ -24,7 +24,7 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          targets: x86_64-pc-windows-msvc
           components: clippy
 
       - name: Set up Flutter
@@ -49,21 +49,22 @@ jobs:
           flutter analyze
           flutter test
 
-      - name: Build macOS Release
+      - name: Build Rust Indexer & FFI
+        run: |
+          cd engine
+          cargo build --release -p bdj_search_indexer -p bdj_search_ffi
+
+      - name: Build Flutter Windows Release
         run: |
           cd frontend
-          flutter build macos --release
+          flutter build windows --release
 
-      - name: Validate Entitlements Isolation
+      - name: Build Inno Setup Installer
         run: |
-          ENTITLEMENTS_OUT=$(codesign -d --entitlements :- frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app || true)
-          if echo "$ENTITLEMENTS_OUT" | grep -i -E 'samplepad|stems|wavevideo|synth|voicespot|license'; then
-            echo "ERROR: Entitlements leakage detected across suite apps!"
-            exit 1
-          fi
+          iscc distribution/installer.iss
 
-      - name: Upload macOS Build Artifacts
+      - name: Upload Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: BDJ_Studio_Search_Pro_macOS
-          path: frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app
+          name: BDJ_Studio_Search_Pro_Windows_Setup
+          path: output/*.exe

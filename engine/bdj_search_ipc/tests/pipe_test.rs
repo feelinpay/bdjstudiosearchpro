@@ -1,3 +1,5 @@
+#![cfg(windows)]
+
 use bdj_search_ipc::{IpcCommand, IpcEvent, PipeClient, PipeServer};
 use std::thread;
 use std::time::Duration;

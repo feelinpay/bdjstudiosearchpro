@@ -106,7 +106,14 @@ impl QueryEvaluator {
         }
     }
 
-    fn matches_file_type(type_name: &str, view: &IndexView, idx: usize) -> bool {
+    /// Evaluates if an index entry matches the CompiledQueryAst.
+    #[inline(always)]
+    pub fn matches_compiled(ast: &crate::query::CompiledQueryAst, view: &IndexView, idx: usize) -> bool {
+        ast.matches(view, idx)
+    }
+
+
+    pub(crate) fn matches_file_type(type_name: &str, view: &IndexView, idx: usize) -> bool {
         let is_dir = view.is_dir(idx);
         let ext = view.get_extension(idx);
 

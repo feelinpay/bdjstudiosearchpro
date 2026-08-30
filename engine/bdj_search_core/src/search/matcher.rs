@@ -1,5 +1,6 @@
 use memchr::memchr2;
 
+#[derive(Clone, Debug)]
 pub struct SubstringMatcher {
     pattern_lower: Vec<u8>,
     first_lower: u8,

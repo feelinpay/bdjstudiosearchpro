@@ -14,19 +14,26 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^2.5.1
   flutter_rust_bridge: 2.13.0
-  flutter_secure_storage: ^9.2.2
-  device_info_plus: ^10.1.2
-  crypto: ^3.0.3
-  cryptography: ^2.7.0
-  shared_preferences: ^2.3.4
-  hotkey_manager: ^0.2.3
-  tray_manager: ^0.2.4
-  desktop_drop: ^0.4.4
-  url_launcher: ^6.3.0
-  window_manager: ^0.3.9
 
+  # Licenciamiento SPP3. Las versiones de estos cuatro paquetes se mantienen
+  # alineadas con BDJ Studio Sample Pad: el HWID y el llavero nativo deben
+  # comportarse igual en toda la suite o el ID del dispositivo deja de coincidir.
   bdj_license_core:
     path: ../../bdj_license_core
+  dartz: ^0.10.1
+  device_info_plus: ^11.5.0
+  flutter_secure_storage: ^10.3.1
+  package_info_plus: ^9.0.1
+  shared_preferences: ^2.3.4
+
+  crypto: ^3.0.3
+  cryptography: ^2.7.0
+
+  desktop_drop: ^0.4.4
+  hotkey_manager: ^0.2.3
+  tray_manager: ^0.2.4
+  url_launcher: ^6.3.0
+  window_manager: ^0.3.9
 
 dev_dependencies:
   flutter_test:
