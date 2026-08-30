@@ -8,6 +8,8 @@ import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+
 import 'core/ffi/frb_generated.dart';
 import 'core/theme/app_colors.dart';
 import 'core/theme/app_theme.dart';
@@ -19,13 +21,91 @@ import 'features/search/widgets/filter_bar.dart';
 import 'features/search/widgets/status_bar.dart';
 import 'features/search/widgets/virtualized_table.dart';
 
+Future<void> _initRustLib() async {
+  ExternalLibrary? externalLib;
+  if (Platform.isWindows) {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final candidates = [
+      '$exeDir\\bdj_search_ffi.dll',
+      '..\\engine\\target\\release\\bdj_search_ffi.dll',
+      '..\\engine\\target\\debug\\bdj_search_ffi.dll',
+      '..\\engine\\bdj_search_ffi\\target\\release\\bdj_search_ffi.dll',
+      '..\\engine\\bdj_search_ffi\\target\\debug\\bdj_search_ffi.dll',
+      'engine\\target\\release\\bdj_search_ffi.dll',
+      'engine\\target\\debug\\bdj_search_ffi.dll',
+    ];
+    for (final c in candidates) {
+      final f = File(c);
+      if (f.existsSync()) {
+        externalLib = ExternalLibrary.open(f.path);
+        debugPrint('RustLib: cargada biblioteca nativa desde ${f.path}');
+        break;
+      }
+    }
+  } else if (Platform.isMacOS) {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final candidates = [
+      '$exeDir/libbdj_search_ffi.dylib',
+      '$exeDir/../Frameworks/libbdj_search_ffi.dylib',
+      '../engine/target/release/libbdj_search_ffi.dylib',
+      '../engine/target/debug/libbdj_search_ffi.dylib',
+      'engine/target/release/libbdj_search_ffi.dylib',
+    ];
+    for (final c in candidates) {
+      final f = File(c);
+      if (f.existsSync()) {
+        externalLib = ExternalLibrary.open(f.path);
+        debugPrint('RustLib: cargada biblioteca nativa desde ${f.path}');
+        break;
+      }
+    }
+  }
+
+  try {
+    if (externalLib != null) {
+      await RustLib.init(externalLibrary: externalLib);
+    } else {
+      await RustLib.init();
+    }
+  } catch (e) {
+    debugPrint('RustLib init error: $e');
+  }
+}
+
+void _ensureIndexerRunning() {
+  if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) return;
+
+  try {
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
+    final candidates = [
+      '$exeDir\\bdj_search_indexer.exe',
+      '..\\engine\\target\\release\\bdj_search_indexer.exe',
+      '..\\engine\\target\\debug\\bdj_search_indexer.exe',
+      'engine\\target\\release\\bdj_search_indexer.exe',
+      'engine\\target\\debug\\bdj_search_indexer.exe',
+    ];
+
+    String? indexerExe;
+    for (final c in candidates) {
+      if (File(c).existsSync()) {
+        indexerExe = c;
+        break;
+      }
+    }
+
+    if (indexerExe != null) {
+      debugPrint('Asegurando indexador en segundo plano: $indexerExe');
+      Process.start(indexerExe, ['--standalone'], mode: ProcessStartMode.detached);
+    }
+  } catch (e) {
+    debugPrint('Indexer spawn note: $e');
+  }
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  try {
-    await RustLib.init();
-  } catch (e) {
-    debugPrint('RustLib init note: $e');
-  }
+  await _initRustLib();
+  _ensureIndexerRunning();
 
   if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
     try {

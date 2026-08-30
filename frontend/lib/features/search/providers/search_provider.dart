@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/ffi/api.dart' as ffi;
@@ -82,13 +83,20 @@ class SearchNotifier extends StateNotifier<SearchState> {
   Timer? _reloadTimer;
 
   Future<void> initEngine() async {
+    _startWatchingIndex();
+    await _tryOpenEngine();
+  }
+
+  Future<bool> _tryOpenEngine() async {
     try {
       await ffi.engineOpen(indexPathStr: '');
       state = state.copyWith(isIndexLoaded: true);
-      await searchFiles('');
-      _startWatchingIndex();
-    } catch (_) {
+      await searchFiles(state.query);
+      return true;
+    } catch (e) {
+      debugPrint('Motor de búsqueda aún no disponible: $e');
       state = state.copyWith(isIndexLoaded: false);
+      return false;
     }
   }
 
@@ -101,6 +109,10 @@ class SearchNotifier extends StateNotifier<SearchState> {
     _reloadTimer?.cancel();
     _reloadTimer = Timer.periodic(_reloadInterval, (_) async {
       if (!mounted) return;
+      if (!state.isIndexLoaded) {
+        await _tryOpenEngine();
+        return;
+      }
       try {
         final changed = await ffi.reloadIfChanged();
         if (changed && mounted) {
