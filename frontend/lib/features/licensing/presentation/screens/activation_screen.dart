@@ -144,17 +144,13 @@ class _ActivationScreenState extends ConsumerState<ActivationScreen> {
   Widget _buildHeader() {
     return Column(
       children: [
-        Container(
-          width: 56,
-          height: 56,
-          decoration: BoxDecoration(
-            color: AppColors.primarySoft,
-            borderRadius: BorderRadius.circular(16),
-          ),
-          child: const Icon(
-            Icons.search_rounded,
-            color: AppColors.primary,
-            size: 30,
+        ClipRRect(
+          borderRadius: BorderRadius.circular(16),
+          child: Image.asset(
+            'assets/images/logo.png',
+            width: 64,
+            height: 64,
+            fit: BoxFit.cover,
           ),
         ),
         const SizedBox(height: 16),
