@@ -22,9 +22,17 @@ enum ViewMode {
   browse,
 }
 
+/// Modo de agrupación de resultados en la tabla virtual.
+enum GroupByMode {
+  none,
+  type,
+  date,
+}
+
 @immutable
 class SearchState {
   final ViewMode mode;
+  final GroupByMode groupBy;
   final String query;
   final String activeFilter;
 
@@ -75,6 +83,7 @@ class SearchState {
 
   const SearchState({
     this.mode = ViewMode.browse,
+    this.groupBy = GroupByMode.none,
     this.query = '',
     this.activeFilter = 'Todos',
     this.browsePath = '',
@@ -121,6 +130,7 @@ class SearchState {
 
   SearchState copyWith({
     ViewMode? mode,
+    GroupByMode? groupBy,
     String? query,
     String? activeFilter,
     String? browsePath,
@@ -145,6 +155,7 @@ class SearchState {
   }) {
     return SearchState(
       mode: mode ?? this.mode,
+      groupBy: groupBy ?? this.groupBy,
       query: query ?? this.query,
       activeFilter: activeFilter ?? this.activeFilter,
       browsePath: browsePath ?? this.browsePath,
@@ -738,6 +749,16 @@ class SearchNotifier extends StateNotifier<SearchState> {
     }
   }
 
+  Future<void> shareSelected() async {
+    final rutas = await selectedPaths(max: 1);
+    if (rutas.isEmpty) return;
+    try {
+      await ffi.shareFile(pathStr: rutas.first);
+    } catch (e) {
+      debugPrint('No se pudo abrir el diálogo de compartir: $e');
+    }
+  }
+
   Future<void> showPropertiesSelected() async {
     final rutas = await selectedPaths(max: 1);
     if (rutas.isEmpty) return;
@@ -821,6 +842,16 @@ class SearchNotifier extends StateNotifier<SearchState> {
   void setResultView(ResultViewMode modo) {
     if (state.viewMode == modo) return;
     state = state.copyWith(viewMode: modo);
+  }
+
+  void setGroupBy(GroupByMode modo) {
+    if (state.groupBy == modo) return;
+    state = state.copyWith(groupBy: modo);
+    if (modo == GroupByMode.type && state.sortCol != 2) {
+      setSort(2);
+    } else if (modo == GroupByMode.date && state.sortCol != 4) {
+      setSort(4);
+    }
   }
 
   /// Construye el CSV del resultado actual.

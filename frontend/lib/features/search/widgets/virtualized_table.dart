@@ -54,9 +54,7 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
             ? _grid(estado, notifier)
             : ListView.builder(
                 controller: _scrollController,
-                itemExtent: _altoFila(viewMode),
-                // El total real, acotado a lo que el motor puede entregar
-                // ordenado. La barra de desplazamiento deja de mentir.
+                itemExtent: estado.groupBy == GroupByMode.none ? _altoFila(viewMode) : null,
                 itemCount: estado.rowCount,
                 itemBuilder: (context, index) {
                   final fila = notifier.rowAt(index);
@@ -66,7 +64,7 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
                       alto: _altoFila(viewMode),
                     );
                   }
-                  return _Fila(
+                  final item = _Fila(
                     fila: fila,
                     index: index,
                     viewMode: viewMode,
@@ -82,6 +80,34 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
                     onSoltarEnCarpeta: (rutas, destino) =>
                         _moverSoltados(rutas, destino),
                   );
+
+                  if (estado.groupBy == GroupByMode.none) {
+                    return item;
+                  }
+
+                  final grupoActual = _grupoDeFila(fila, estado.groupBy);
+                  bool esInicio = false;
+                  if (index == 0) {
+                    esInicio = true;
+                  } else {
+                    final anterior = notifier.rowAt(index - 1);
+                    if (anterior != null && _grupoDeFila(anterior, estado.groupBy) != grupoActual) {
+                      esInicio = true;
+                    }
+                  }
+
+                  if (esInicio && grupoActual.isNotEmpty) {
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        _CabeceraGrupo(titulo: grupoActual),
+                        item,
+                      ],
+                    );
+                  }
+
+                  return item;
                 },
               );
 
@@ -213,6 +239,7 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
           _item('unzip', 'Descomprimir aquí'),
         const PopupMenuDivider(),
         _item('reveal', 'Mostrar la ubicación'),
+        _item('share', 'Compartir…'),
         _item('copypath', varios ? 'Copiar las rutas' : 'Copiar la ruta'),
         _item('copyname', varios ? 'Copiar los nombres' : 'Copiar el nombre'),
         const PopupMenuDivider(),
@@ -232,6 +259,8 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         notifier.openSelected();
       case 'reveal':
         notifier.revealSelected();
+      case 'share':
+        notifier.shareSelected();
       case 'copypath':
         notifier.copySelectedPath();
       case 'copyname':
@@ -884,4 +913,61 @@ class _EstadoVacio extends StatelessWidget {
     RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
     (m) => '${m[1]}.',
   );
+}
+
+String _grupoDeFila(FileRow fila, GroupByMode mode) {
+  if (mode == GroupByMode.type) {
+    return fila.tipoLabel;
+  } else if (mode == GroupByMode.date) {
+    if (fila.mtime == 0) return 'Sin fecha';
+    final dt = DateTime.fromMillisecondsSinceEpoch(fila.mtime * 1000);
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays == 0) return 'Hoy';
+    if (diff.inDays == 1) return 'Ayer';
+    if (diff.inDays <= 7) return 'Esta semana';
+    if (diff.inDays <= 30) return 'Este mes';
+    if (diff.inDays <= 365) return 'Este año';
+    return 'Hace más de un año';
+  }
+  return '';
+}
+
+class _CabeceraGrupo extends StatelessWidget {
+  final String titulo;
+  const _CabeceraGrupo({required this.titulo});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      margin: const EdgeInsets.only(top: 8, bottom: 4),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(
+          top: BorderSide(color: AppColors.border),
+          bottom: BorderSide(color: AppColors.border),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.keyboard_arrow_down_rounded,
+            size: 16,
+            color: AppColors.textSecondary,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            titulo.toUpperCase(),
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.5,
+              color: AppColors.textPrimary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

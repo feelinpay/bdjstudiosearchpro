@@ -8,6 +8,7 @@ import '../../fileops/file_ops_dialogs.dart';
 import '../../fileops/providers/file_ops_provider.dart';
 import '../../../core/theme/app_colors.dart';
 import '../providers/favorites_provider.dart';
+import '../providers/preview_provider.dart';
 import '../providers/search_provider.dart';
 import '../models/view_mode.dart';
 
@@ -150,6 +151,34 @@ SubmenuButton(
                   style: const TextStyle(fontSize: 13),
                 ),
               ),
+            const Divider(),
+            SubmenuButton(
+              menuChildren: [
+                CheckboxMenuButton(
+                  value: searchState.groupBy == GroupByMode.none,
+                  onChanged: (_) => searchNotifier.setGroupBy(GroupByMode.none),
+                  child: const Text('Ninguno'),
+                ),
+                CheckboxMenuButton(
+                  value: searchState.groupBy == GroupByMode.type,
+                  onChanged: (_) => searchNotifier.setGroupBy(GroupByMode.type),
+                  child: const Text('Por Tipo (Audio, Vídeo, Carpetas)'),
+                ),
+                CheckboxMenuButton(
+                  value: searchState.groupBy == GroupByMode.date,
+                  onChanged: (_) => searchNotifier.setGroupBy(GroupByMode.date),
+                  child: const Text('Por Fecha (Hoy, Esta semana, Mes)'),
+                ),
+              ],
+              child: const Text('Agrupar por'),
+            ),
+            const Divider(),
+            CheckboxMenuButton(
+              value: ref.watch(previewProvider).isVisible,
+              onChanged: (_) => ref.read(previewProvider.notifier).toggle(),
+              shortcut: const SingleActivator(LogicalKeyboardKey.keyP, alt: true),
+              child: const Text('Panel de vista previa'),
+            ),
           ],
           child: const Text('Ver'),
         ),

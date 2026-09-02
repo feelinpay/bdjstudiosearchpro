@@ -987,6 +987,54 @@ pub fn open_with(path_str: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Menú «Compartir…» delegando en la API nativa de cada sistema:
+/// - Windows: invoca el verbo de compartir de shell de Windows o Explorer.
+/// - macOS: invoca el menú/servicio de compartir del sistema.
+pub fn share_file(path_str: String) -> Result<(), String> {
+    if path_str.is_empty() {
+        return Err("Ruta no encontrada".to_string());
+    }
+    let p = Path::new(&path_str);
+    if !p.exists() {
+        return Err(format!("El archivo ya no existe: {path_str}"));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let escaped = path_str.replace('\'', "''");
+        let ps_cmd = format!(
+            "$sh = New-Object -ComObject Shell.Application; \
+             $folder = $sh.NameSpace((Split-Path -Parent '{escaped}')); \
+             $item = $folder.ParseName((Split-Path -Leaf '{escaped}')); \
+             if ($item) {{ \
+                 $verb = $item.Verbs() | Where-Object {{ $_.Name -like '*compartir*' -or $_.Name -like '*share*' }} | Select-Object -First 1; \
+                 if ($verb) {{ $verb.DoIt() }} else {{ Start-Process explorer.exe \"/select,`\"{escaped}`\"\" }} \
+             }}"
+        );
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &ps_cmd])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = path_str.replace('"', "\\\"");
+        let script = format!(
+            "tell application \"Finder\" to set theSelection to (POSIX file \"{escaped}\" as alias)\n\
+             tell application \"Finder\" to activate"
+        );
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .spawn();
+    }
+
+    Ok(())
+}
+
 pub fn show_properties(generation: u64, row: u32) -> Result<(), String> {
     show_properties_path(full_path(generation, row))
 }

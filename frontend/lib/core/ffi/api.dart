@@ -177,6 +177,12 @@ Future<void> openPath({required String pathStr}) =>
 Future<void> openWith({required String pathStr}) =>
     RustLib.instance.api.crateApiOpenWith(pathStr: pathStr);
 
+/// Menú «Compartir…» delegando en la API nativa de cada sistema:
+/// - Windows: invoca el verbo de compartir de shell de Windows o Explorer.
+/// - macOS: invoca el menú/servicio de compartir del sistema.
+Future<void> shareFile({required String pathStr}) =>
+    RustLib.instance.api.crateApiShareFile(pathStr: pathStr);
+
 Future<void> showProperties({required BigInt generation, required int row}) =>
     RustLib.instance.api.crateApiShowProperties(
       generation: generation,
