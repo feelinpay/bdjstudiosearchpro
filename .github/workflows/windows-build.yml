@@ -42,17 +42,15 @@ jobs:
           cargo test --workspace --release
           cargo clippy --workspace -- -D warnings
 
+      - name: Generate FFI bridge & Build Rust (Windows)
+        run: powershell -ExecutionPolicy Bypass -File tools/build_native.ps1
+
       - name: Run Flutter Analyze & Tests
         run: |
           cd frontend
           flutter pub get
           flutter analyze
           flutter test
-
-      - name: Build Rust Indexer & FFI
-        run: |
-          cd engine
-          cargo build --release -p bdj_search_indexer -p bdj_search_ffi
 
       - name: Build Flutter Windows Release
         run: |

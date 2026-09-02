@@ -1,8 +1,15 @@
 ; Script de instalación Inno Setup 6 para BDJ Studio Search Pro
-; Registra el servicio de indexación Windows en modo delayed-auto y limpia residuos al desinstalar
+; Registra el servicio de indexación Windows en modo delayed-auto y al
+; desinstalar detiene el servicio y borra TODOS los datos (nada sobrevive:
+; es la política compartida con las demás apps BDJ Studio).
 
+; La versión puede inyectarse desde fuera para que no se desincronice de
+; pubspec.yaml / preflight:  ISCC /DMyAppVersion=1.0.0 installer.iss
+; El valor de abajo es solo el respaldo cuando se compila a mano.
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 #define MyAppName "BDJ Studio Search Pro"
-#define MyAppVersion "1.0.0"
 #define MyAppPublisher "BDJ Studio"
 #define MyAppExeName "bdj_studio_search_pro.exe"
 
@@ -25,7 +32,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
 Source: "..\frontend\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -33,7 +40,7 @@ Source: "..\engine\target\release\bdj_search_indexer.exe"; DestDir: "{app}"; Fla
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
 ; Registro e inicio del servicio elevado para el indexador en segundo plano
@@ -48,5 +55,10 @@ Filename: "{sys}\sc.exe"; Parameters: "stop BDJSearchProIndexer"; Flags: runhidd
 Filename: "{sys}\sc.exe"; Parameters: "delete BDJSearchProIndexer"; Flags: runhidden
 
 [UninstallDelete]
-; Limpieza integral de datos del índice local en ProgramData
+; Política del producto: los datos NO sobreviven a la desinstalación.
+; Índice, configuración y logs del indexador (servicio que corre como sistema).
 Type: filesandordirs; Name: "{commonappdata}\BDJ Studio\Search Pro"
+; Datos del frontend (preferencias y almacén seguro heredado):
+; getApplicationSupportDirectory() en Windows es %APPDATA%\CompanyName\ProductName
+; (Runner.rc: CompanyName "com.bdjstudio", ProductName "BDJ Studio Search Pro").
+Type: filesandordirs; Name: "{userappdata}\com.bdjstudio\BDJ Studio Search Pro"

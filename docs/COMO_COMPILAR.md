@@ -1,146 +1,233 @@
-# Bloque 1 terminado — qué falta hacer a mano
+# Cómo compilar y arrancar BDJ Studio Search Pro
 
-**Fecha:** 30 de agosto de 2026
+Última actualización: 31 de agosto de 2026.
 
-Los archivos ya están escritos en tu disco. Quedan tres cosas que esta sesión no puede hacer
-por sí sola: **borrar dos archivos** y **ejecutar las compilaciones**.
-
----
-
-## 1. Borra estos dos archivos (obligatorio, si no la compilación falla)
-
-Ya no los referencia nadie, pero siguen en el disco y `cargo` y `flutter analyze` los verán:
-
-```
-C:\Users\David Zapata\Desktop\Aplicacion_para_DJs\BDJ_Studio_Search_Pro\engine\bdj_search_core\src\license.rs
-C:\Users\David Zapata\Desktop\Aplicacion_para_DJs\BDJ_Studio_Search_Pro\frontend\lib\features\license\license_dialog.dart
-```
-
-La carpeta `frontend\lib\features\license\` queda vacía; bórrala también. La licencia ahora
-vive en `frontend\lib\features\licensing\`, con `-ing`.
+Este documento asume que partes del proyecto tal y como está ahora en disco, con
+los cambios de las fases 1 a 12 ya aplicados.
 
 ---
 
-## 2. BDJ Studio License — compilar
+## 0. Lo que tienes que saber antes de empezar
 
-El catálogo ya tiene Search Pro (los 7 puntos) y la versión subió a **1.0.3**.
+Tres cosas han cambiado y afectan al primer arranque:
+
+**El formato del índice pasó a la versión 2.** Trae dos columnas nuevas: el rango
+alfabético de cada entrada —lo que hace que ordenar por nombre cueste lo que el
+resultado y no lo que el índice— y la lista de hijos de cada carpeta, que es lo
+que permite entrar en una carpeta sin tocar el disco. Un `index.bdjx` de la
+versión 1 **se rechaza a propósito**. El servicio lo reconstruye entero la
+primera vez que arranca: ese primer escaneo tarda, y a partir de ahí es
+instantáneo. Si quieres forzarlo, borra el archivo:
 
 ```powershell
-cd "C:\Users\David Zapata\Desktop\Aplicacion_para_DJs\BDJ_Studio_License\frontend"
-flutter clean
-flutter pub get
-flutter analyze
-flutter build windows --release
-flutter build apk --release
-
-cd ..\distribution
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" bdj_studio_license_setup.iss
+Remove-Item "C:\ProgramData\BDJ Studio\Search Pro\index.bdjx" -ErrorAction SilentlyContinue
 ```
 
-El instalador sale en la misma carpeta `distribution` como
-`BDJ_Studio_License_Setup_1.0.3.exe`. El APK lo genera Flutter en
-`frontend\build\app\outputs\flutter-apk\app-release.apk`; cópialo a `distribution` como
-`BDJ_Studio_License_1.0.3.apk`.
+**El servicio ya no indexa sin licencia.** Era el fallo D-6 de la auditoría: un
+servicio con privilegios de sistema recorría el disco entero sin comprobar nada.
+Ahora la aplicación le comunica el estado de la licencia al arrancar y el
+servicio obedece. La consecuencia práctica es que **si la aplicación no se abre
+nunca, no hay índice**. Es lo correcto para un producto con licencia, pero
+conviene saberlo antes de verlo.
 
-**Ojo con la ruta de Inno.** La que me diste
-(`AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Inno Setup 6`) es la carpeta de
-accesos directos del menú Inicio, no la instalación. El compilador de línea de comandos es
-`ISCC.exe` y suele estar en `C:\Program Files (x86)\Inno Setup 6\`. Si ahí no está, ejecuta
-esto y usa lo que salga:
+**La superficie FFI ha cambiado**, así que hay que regenerar los enlaces
+(paso 2). Sin ese paso la aplicación no compila.
 
-```powershell
-Get-ChildItem -Path "C:\Program Files (x86)","C:\Program Files" -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object FullName
-```
-
-### Prueba de que el .txt en Android quedó arreglado
-Instala el APK, entra al panel, genera una licencia y pulsa **Descargar .txt**. Antes fallaba
-porque `FilePicker.saveFile` se llamaba sin el parámetro `bytes`, que es obligatorio desde
-file_picker 10: en Android el propio plugin escribe el archivo a través del selector del
-sistema y sin bytes devolvía `null`. Ahora se le pasan los bytes y en escritorio se sigue
-escribiendo el archivo a mano, que es lo que allí hace falta.
+**Hay un archivo nuevo junto al índice: `overlay.bdjo`.** Es la capa de cambios
+recientes. El servicio la publica en cuanto ocurre algo en el disco —cuesta
+milisegundos, porque solo contiene lo que ha cambiado— y la aplicación la lee
+junto al índice. Es lo que hace que un archivo copiado hace un segundo aparezca
+en la lista sin esperar a que se reescriba el índice entero. Se puede borrar sin
+miedo: se vuelve a crear sola, y mientras no esté simplemente se ven los cambios
+más tarde.
 
 ---
 
-## 3. BDJ Studio Search Pro — compilar
+## 1. Requisitos
 
-**Primero regenera los bindings.** Yo edité a mano los archivos generados por
-flutter_rust_bridge para quitar la licencia falsa, porque este entorno no pudo descargar el
-SDK de Dart. El motor Rust compila y pasa todas las pruebas así, pero el generador es la
-fuente de verdad: si mi edición fue exacta, este paso no cambia nada; si no, lo corrige.
+| Herramienta | Versión mínima | Comprobación |
+|---|---|---|
+| Rust | 1.85 (edición 2024) | `cargo --version` |
+| Flutter | 3.24 | `flutter --version` |
+| `flutter_rust_bridge_codegen` | 2.13.0 exacta | `flutter_rust_bridge_codegen --version` |
+| Inno Setup 6 | 6.x | solo para el instalador de Windows |
+
+Si te falta el generador:
+
+```powershell
+cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+```
+
+La versión tiene que coincidir **exactamente** con la del `Cargo.toml` de
+`bdj_search_ffi` (`flutter_rust_bridge = "=2.13.0"`). Una versión distinta genera
+enlaces incompatibles con el tiempo de ejecución.
+
+---
+
+## 2. Regenerar los enlaces entre Rust y Dart
+
+**Obligatorio**: `engine/bdj_search_ffi/src/api.rs` ha cambiado.
 
 ```powershell
 cd "C:\Users\David Zapata\Desktop\Aplicacion_para_DJs\BDJ_Studio_Search_Pro\frontend"
-cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked   # solo la primera vez
 flutter_rust_bridge_codegen generate
+```
 
+Reescribe cuatro archivos, que **no** hay que editar a mano:
+
+- `frontend/lib/core/ffi/api.dart`
+- `frontend/lib/core/ffi/frb_generated.dart`
+- `frontend/lib/core/ffi/frb_generated.io.dart`
+- `engine/bdj_search_ffi/src/frb_generated.rs`
+
+Si el generador se queja de que no encuentra el crate, comprueba
+`frontend/flutter_rust_bridge.yaml`: debe apuntar a `../engine/bdj_search_ffi/src/api.rs`.
+
+---
+
+## 3. Compilar el motor
+
+```powershell
+cd "..\engine"
+cargo build --release
+cargo test --workspace
+```
+
+`cargo test` debe terminar sin fallos. La prueba de latencia sobre diez millones
+de entradas está marcada como ignorada porque construye un corpus enorme; para
+ejecutarla:
+
+```powershell
+cargo test --release -p bdj_search_core --test latency_budget_test -- --ignored --nocapture
+```
+
+Y para medir sobre tu propia máquina, con cifras comparables:
+
+```powershell
+cargo run --release -p bdj_search_core --example bench_corpus -- 10000000 C:\Temp\corpus.bdjx
+```
+
+Los artefactos quedan en `engine\target\release\`:
+
+- `bdj_search_ffi.dll` — la biblioteca que carga la aplicación
+- `bdj_search_indexer.exe` — el servicio
+
+---
+
+## 4. Compilar la aplicación
+
+```powershell
+cd "..\frontend"
 flutter pub get
 flutter analyze
-flutter test
-
-cd ..\engine
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --release
+flutter build windows --release
 ```
 
-Si `flutter_rust_bridge_codegen generate` protesta con `prefix not found`, es porque la línea
-`rust_output:` de `frontend\flutter_rust_bridge.yaml` tiene una ruta que el generador no sabe
-resolver. Bórrala: el valor por defecto ya es el correcto.
+`flutter analyze` tiene que salir limpio. Si aparece algo, mándamelo y lo
+arreglo: no he podido ejecutarlo desde aquí porque en este entorno no hay
+cadena de herramientas de Dart.
+
+El ejecutable queda en `frontend\build\windows\x64\runner\Release\`.
+
+Copia la biblioteca del motor junto al ejecutable:
+
+```powershell
+Copy-Item "..\..\engine\target\release\bdj_search_ffi.dll" `
+          "build\windows\x64\runner\Release\"
+Copy-Item "..\..\engine\target\release\bdj_search_indexer.exe" `
+          "build\windows\x64\runner\Release\"
+```
 
 ---
 
-## Lo que cambió, en corto
+## 5. Poner el servicio en marcha
 
-### Search Pro
-- **Eliminado el esquema de licencia propietario.** `license.rs`, `LicenseInfoFfi`,
-  `get_license_status` y `activate_product_key` ya no existen. Con ellos se va la prueba de
-  14 días y el `|| parts.len() == 4` que aceptaba cualquier clave `BDJ6-XXXX-XXXX-XXXX`.
-- **Licenciamiento SPP3 real**, portado de Sample Pad: `DeviceFingerprint` (HWID V2 sin tocar
-  una línea), `SecureStorageImpl` con autoprueba del llavero, `LicenseManager` con
-  `productCode: 'bdj_studio_search_pro'` y claves `bdj.search_pro.*`. Toda la criptografía la
-  pone `bdj_license_core`.
-- **El ID del dispositivo vuelve a ser el de la suite.** Mismo formato
-  `XXXX-XXXX-XXXX-XXXX` y mismo valor que muestra Sample Pad en la misma máquina, así que
-  BDJ Studio License ya puede emitirle licencias.
-- **Portón de arranque.** `LicenseGate` decide antes de construir nada: cargando → activación
-  → aplicación. `SearchHomeScreen` solo existe en la rama con licencia, así que un equipo sin
-  activar no llega ni a mapear el índice. Revalida al volver del segundo plano.
-- **Pantalla de activación en blanco**, con los dos pasos numerados, el ID en monoespaciada y
-  el botón *Copiar ID*. Más un panel de licencia detrás del icono de la barra, para que un
-  cliente ya activado pueda leer su ID cuando pida soporte o desactivar el equipo.
-- **Arreglado que no compilara en macOS**: `PipeServer` está detrás de `#[cfg(windows)]` y se
-  importaba sin condición en el indexador y en `pipe_test.rs`.
-- **`clippy -D warnings` limpio** en todo el workspace.
-- **Pruebas nuevas** en `widget_test.dart`: que sin licencia la app se queda en la pantalla de
-  activación, y que `BDJ6-0000-0000-0000` —la clave que antes entraba— es rechazada. Si esa
-  segunda prueba deja de fallar la activación, hemos vuelto atrás.
+En desarrollo, en primer plano y con registro en pantalla:
 
-### BDJ Studio License
-- Los 7 puntos del catálogo, con `bdj_studio_search_pro` y código numérico 6.
-- Corregida la descarga del `.txt` en Android.
-- Versión 1.0.2 → **1.0.3** en `pubspec.yaml` y en el `.iss`.
+```powershell
+cd "..\engine\target\release"
+.\bdj_search_indexer.exe --standalone
+```
+
+Como servicio de Windows, en una consola **como administrador**:
+
+```powershell
+sc.exe create BDJSearchProIndexer binPath= "C:\Ruta\Completa\bdj_search_indexer.exe" start= auto
+sc.exe start BDJSearchProIndexer
+```
+
+Comprobar que está vivo y que ha publicado algo:
+
+```powershell
+sc.exe query BDJSearchProIndexer
+dir "C:\ProgramData\BDJ Studio\Search Pro\"
+```
+
+Deberías ver `index.bdjx` y `settings.json`.
+
+### Si la aplicación dice que no hay índice
+
+La barra de estado ahora dice el motivo concreto en lugar de «Cargando motor…».
+Los cuatro casos:
+
+| Lo que dice | Qué pasa | Qué hacer |
+|---|---|---|
+| «Sin índice: el servicio no está en marcha» | No existe `index.bdjx` | Arrancar el servicio (paso 5) |
+| «Reconstruyendo el índice…» | El índice es de la versión 1 | Esperar a que el servicio termine |
+| «Índice dañado: se reconstruirá» | Fichero truncado o corrupto | Esperar, o borrarlo para forzar |
+| «Sin permiso para leer el índice» | Permisos de `C:\ProgramData\...` | Revisar los permisos de esa carpeta |
+
+Pasa el ratón por encima del texto: la ayuda emergente da la ruta exacta que se
+está mirando.
 
 ---
 
-## Verificación que sí pude ejecutar
+## 6. El instalador
+
+La ruta de Inno Setup en tu equipo es:
 
 ```
-cargo clippy --workspace --all-targets -- -D warnings   → limpio
-cargo test --workspace --release                        → 14 pruebas, 0 fallos
+C:\Users\David Zapata\AppData\Local\Programs\Inno Setup 6\ISCC.exe
 ```
 
-Las 3 pruebas de la licencia falsa desaparecieron con ella; una de ellas afirmaba que
-`BDJ6-AAAA-BBBB-CCCC` era válida.
+(El acceso directo del menú Inicio apunta ahí; `ISCC.exe` no está en la carpeta
+del menú Inicio, sino en `Programs`.)
 
-Lo que **no** pude ejecutar: `flutter analyze`, `flutter test`, `flutter build` ni `ISCC.exe`.
-Esta sesión llega a tus archivos pero no puede ejecutar programas en tu PC. Si algo de lo
-anterior falla al compilar, pásame el error y lo corrijo.
+```powershell
+& "C:\Users\David Zapata\AppData\Local\Programs\Inno Setup 6\ISCC.exe" `
+  "C:\Users\David Zapata\Desktop\Aplicacion_para_DJs\BDJ_Studio_Search_Pro\distribution\installer.iss"
+```
+
+Antes de generarlo, comprueba que `installer.iss` incluye los tres artefactos:
+el ejecutable de la aplicación, `bdj_search_ffi.dll` y `bdj_search_indexer.exe`,
+y que registra el servicio.
 
 ---
 
-## Siguiente bloque
+## 7. macOS
 
-Con la licencia cerrada, el siguiente por impacto es el **bloque 3 del informe**: los datos
-verdaderos del índice. Hoy `parent_file_ref` se descarta y todas las rutas salen como
-`C:\C:\archivo.wav`, y los tamaños y fechas están fijados a 0 y a noviembre de 2023. Es lo que
-hace que las columnas Ruta, Tamaño y Modificado, y los filtros `ruta:`, `tam:` y `mod:`, no
-sirvan para nada. Dime y entro.
+El flujo de trabajo de GitHub Actions (`.github/workflows/macos-build.yml`) hace
+todo lo anterior en un runner de macOS y sube el `.dmg` como artefacto. Para
+compilar a mano:
+
+```bash
+cd frontend
+flutter_rust_bridge_codegen generate
+cd ../engine && cargo build --release
+cd ../frontend && flutter build macos --release
+```
+
+El agente de usuario se instala con `distribution/macos/postinstall`, que copia
+el `.plist` a `/Library/LaunchAgents`.
+
+---
+
+## 8. Comprobación rápida de que todo está bien
+
+1. La barra de estado dice «Índice listo · gen N».
+2. Escribir tres letras devuelve resultados sin parpadeo.
+3. El contador de la izquierda da un número grande y un tiempo pequeño.
+4. Marcar cuatro archivos con Ctrl y arrastrarlos a Ableton mete los cuatro.
+5. Con una carpeta abierta, `Ctrl + C` y `Ctrl + V` copian de verdad y aparece el
+   panel de progreso abajo a la derecha.
+6. `Ctrl + Z` deshace la última operación reversible.

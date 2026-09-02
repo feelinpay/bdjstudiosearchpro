@@ -1,6 +1,6 @@
 # BDJ Studio Search Pro — Especificación Binaria del Formato de Índice (.bdjx)
 
-**Versión del formato:** 1  
+**Versión del formato:** 2  
 **Extensión:** `.bdjx`  
 **Alineación:** Todas las secciones de columnas están alineadas a 64 bytes (tamaño de línea de caché x86_64 / ARM64).  
 **Endianness:** Little-endian nativo.  
@@ -13,7 +13,7 @@
 | Offset | Tamaño | Tipo | Campo | Descripción |
 |---|---|---|---|---|
 | 0 | 8 | `[u8; 8]` | `magic` | Identificador de 8 bytes: `"BDJXIDX\0"` (0x42, 0x44, 0x4A, 0x58, 0x49, 0x44, 0x58, 0x00) |
-| 8 | 4 | `u32` | `version` | Versión del formato. Actualmente `1`. Si difiere, se rechaza y se reconstruye. |
+| 8 | 4 | `u32` | `version` | Versión del formato. Actualmente `2`. Si difiere, se rechaza y se reconstruye. |
 | 12 | 4 | `u32` | `header_crc` | Checksum XXH3 (32-bit truncado) de los bytes 16..64. |
 | 16 | 8 | `u64` | `entry_count` | Número total de entradas indexadas (filas). |
 | 24 | 8 | `u64` | `arena_len` | Tamaño en bytes de la arena contigua de nombres UTF-8. |
@@ -52,6 +52,45 @@ Columnas indexadas paralelamente (Struct of Arrays):
 12. `name_arena` (`[u8]` × `arena_len`): Bloque denso contiguo de nombres UTF-8 sin delimitadores nulos.
 13. `ext_table` (`[u8]`): Bloque de extensiones internadas (pares `[u16 len, bytes]` terminados en tabla).
 14. `vol_table` (`[u8]`): Bloque de metadatos de volúmenes montados/desmontados (UUID, letra/punto de montaje, tipo FS, etiqueta).
+15. `name_rank` (`u32` × `entry_count`): Posición alfabética de cada entrada. Es la permutación **inversa** de `name_order`: `name_rank[name_order[i]] == i`.
+16. `child_off` (`u32` × `entry_count + 1`): Desplazamientos comprimidos por filas de la lista de hijos.
+17. `child_idx` (`u32` × número de entradas con padre): Identificadores de los hijos, agrupados por padre y ordenados.
+
+La tabla de secciones ocupa 17 × 16 = 272 bytes, redondeados a 320 para mantener
+la alineación a 64.
+
+---
+
+## 2.1 Qué añade la versión 2, y por qué
+
+**`name_rank`.** Ordenar por nombre era lo más caro del motor y es el orden que
+la aplicación trae por defecto. Antes había que recorrer `name_order` **entera**
+—diez millones de posiciones— filtrando por un mapa de bits que además se
+reservaba en cada pulsación de tecla, aunque el resultado fueran tres filas. Con
+el rango precalculado, ordenar por nombre es ordenar por una clave entera de
+cuatro bytes, y cuesta lo que el resultado.
+
+Coste: 4 bytes por entrada.
+
+**`child_off` / `child_idx`.** Los hijos de `i` son
+`child_idx[child_off[i] .. child_off[i + 1]]`. Abrir una carpeta pasa a ser leer
+un rango contiguo de memoria ya mapeada, sin tocar el disco y sin recorrer el
+índice. Es lo que hace que entrar en una carpeta con cincuenta mil archivos sea
+instantáneo.
+
+Coste: unos 8 bytes por entrada.
+
+**Invariante que el motor da por buena:** `name_off` **no decrece** con el
+identificador, porque los nombres se escriben en la arena en el mismo orden en
+que se insertan las entradas. El barrido vectorial de nombres se apoya en ello
+para traducir un acierto a su entrada con un cursor que solo avanza, en lugar de
+una búsqueda binaria. Si la invariante se rompe, el barrido lo detecta y se
+retira al recorrido entrada por entrada en lugar de dar resultados equivocados.
+
+**Migración:** no la hay, y es deliberado. Un índice de la versión 1 se rechaza
+con `InvalidVersion` y el servicio lo reconstruye entero. Reconstruir cuesta unos
+minutos una sola vez; escribir y mantener un convertidor para un formato que solo
+ha existido en desarrollo no compensa.
 
 ---
 

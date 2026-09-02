@@ -49,10 +49,8 @@ jobs:
           flutter analyze
           flutter test
 
-      - name: Build macOS Release
-        run: |
-          cd frontend
-          flutter build macos --release
+      - name: Generate FFI bridge & Build macOS Release
+        run: bash tools/build_macos.sh
 
       - name: Validate Entitlements Isolation
         run: |

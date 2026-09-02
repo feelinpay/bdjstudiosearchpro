@@ -1,4 +1,4 @@
-﻿# Rust
+# Rust
 target/
 engine/target/
 **/*.rs.bk
@@ -32,3 +32,9 @@ coverage/
 # Local indices
 *.bdjx
 *.bdjx.tmp
+*.bdjo
+
+# Python / Scratch
+__pycache__/
+*.pyc
+scratch_plan.html
