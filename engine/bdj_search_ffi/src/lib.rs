@@ -27,6 +27,8 @@ mod tests {
         println!("ruta:    {}", estado.index_path);
         println!("existe:  {} ({} bytes)", estado.file_exists, estado.file_size);
         println!("mensaje: {}", estado.message);
+        let sst = api::service_status();
+        println!("service_reachable: {}, indexing: {}", sst.reachable, sst.indexing_enabled);
 
         let res = api::engine_open(String::new());
         assert!(res.is_ok(), "no se pudo abrir el indice: {res:?}");

@@ -204,6 +204,7 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
   Future<BigInt> createFolder(String parent, String name) async {
     final id = await ffi.fsopCreateFolder(parent: parent, name: name);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 
@@ -211,12 +212,14 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
   Future<BigInt> createFile(String parent, String name) async {
     final id = await ffi.fsopCreateFile(parent: parent, name: name);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 
   Future<BigInt> rename(String path, String newName) async {
     final id = await ffi.fsopRename(path: path, newName: newName);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 
@@ -225,6 +228,7 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
     if (rutas.isEmpty) return BigInt.zero;
     final id = await ffi.fsopDuplicate(sources: rutas);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 
@@ -234,6 +238,7 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
     if (rutas.isEmpty) return BigInt.zero;
     final id = await ffi.fsopTrash(sources: rutas);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 
@@ -246,6 +251,7 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
     if (rutas.isEmpty) return BigInt.zero;
     final id = await ffi.fsopDeletePermanently(sources: rutas);
     _ensurePolling();
+    await _ref.read(searchProvider.notifier).refreshAfterFileOperation();
     return id;
   }
 

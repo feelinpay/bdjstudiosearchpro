@@ -340,9 +340,69 @@ class SearchNotifier extends StateNotifier<SearchState> {
     }
   }
 
+  StreamSubscription<FileSystemEvent>? _folderWatcher;
+  Timer? _watcherDebounce;
+
+  void _iniciarVigilanciaDirectorio(String ruta) {
+    _folderWatcher?.cancel();
+    _folderWatcher = null;
+    try {
+      final dir = Directory(ruta);
+      if (dir.existsSync()) {
+        _folderWatcher = dir.watch(events: FileSystemEvent.all).listen(
+          (event) {
+            _watcherDebounce?.cancel();
+            _watcherDebounce = Timer(const Duration(milliseconds: 80), () {
+              if (mounted && state.mode == ViewMode.browse && state.browsePath == ruta) {
+                _repeatCurrentView();
+              }
+            });
+          },
+          onError: (e) {
+            debugPrint('Error en watcher de directorio: $e');
+          },
+        );
+      }
+    } catch (_) {}
+  }
+
+  void _cancelarVigilanciaDirectorio() {
+    _folderWatcher?.cancel();
+    _folderWatcher = null;
+    _watcherDebounce?.cancel();
+    _watcherDebounce = null;
+  }
+
+  void _ordenarFilas(List<FileRow> rows, int sortCol, bool ascending) {
+    rows.sort((a, b) {
+      if (a.isDirectory != b.isDirectory) {
+        return a.isDirectory ? -1 : 1;
+      }
+      int cmp = 0;
+      switch (sortCol) {
+        case 0:
+          cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+          break;
+        case 1:
+          cmp = a.extension.toLowerCase().compareTo(b.extension.toLowerCase());
+          break;
+        case 2:
+          cmp = a.size.compareTo(b.size);
+          break;
+        case 3:
+          cmp = a.mtime.compareTo(b.mtime);
+          break;
+        default:
+          cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      }
+      return ascending ? cmp : -cmp;
+    });
+  }
+
   @override
   void dispose() {
     _debounceTimer?.cancel();
+    _cancelarVigilanciaDirectorio();
     super.dispose();
   }
 
@@ -457,17 +517,6 @@ class SearchNotifier extends StateNotifier<SearchState> {
     state = state.copyWith(isSearching: true);
 
     try {
-      final gen = cleanPath.isEmpty
-          ? await ffi.browseRoots(sortCol: state.sortCol, ascending: state.ascending)
-          : await ffi.browsePath(
-              path: cleanPath,
-              sortCol: state.sortCol,
-              ascending: state.ascending,
-              limit: _initialLimit,
-            );
-      final status = await ffi.searchStatus(generation: gen);
-      if (!mounted || seq != _seq) return false;
-
       var historial = state.history;
       var indice = state.historyIndex;
       if (pushHistory) {
@@ -480,75 +529,83 @@ class SearchNotifier extends StateNotifier<SearchState> {
         }
       }
 
-      if (status.totalCount == 0 && cleanPath.isNotEmpty) {
-        try {
-          final dir = Directory(cleanPath);
-          if (dir.existsSync()) {
-            final entities = dir.listSync(followLinks: false);
-            if (entities.isNotEmpty) {
-              final fallbackRows = <FileRow>[];
-              for (final e in entities) {
-                final isDir = e is Directory;
-                final stat = e.statSync();
-                final name = e.path.split(RegExp(r'[\\/]')).last;
-                if (name.isEmpty) continue;
-                final ext = isDir ? '' : (name.contains('.') ? name.split('.').last : '');
-                fallbackRows.add(FileRow(
-                  index: fallbackRows.length,
-                  name: name,
-                  path: cleanPath,
-                  extension: ext,
-                  size: stat.size,
-                  mtime: stat.modified.millisecondsSinceEpoch ~/ 1000,
-                  flags: isDir ? 1 : 0,
-                ));
-              }
-              fallbackRows.sort((a, b) {
-                if (a.isDirectory != b.isDirectory) {
-                  return a.isDirectory ? -1 : 1;
-                }
-                return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-              });
-              for (var i = 0; i < fallbackRows.length; i++) {
-                final r = fallbackRows[i];
-                fallbackRows[i] = FileRow(
-                  index: i,
-                  name: r.name,
-                  path: r.path,
-                  extension: r.extension,
-                  size: r.size,
-                  mtime: r.mtime,
-                  flags: r.flags,
-                );
-              }
-              _cache.clear();
-              final pageSize = _cache.pageSize;
-              final numPages = (fallbackRows.length / pageSize).ceil();
-              for (var p = 0; p < numPages; p++) {
-                final start = p * pageSize;
-                final end = (start + pageSize).clamp(0, fallbackRows.length);
-                _cache.put(p, fallbackRows.sublist(start, end));
-              }
-              state = state.copyWith(
-                mode: ViewMode.browse,
-                browsePath: cleanPath,
-                history: historial,
-                historyIndex: indice,
-                generation: gen,
-                totalCount: fallbackRows.length,
-                readyCount: fallbackRows.length,
-                elapsedMs: 1,
-                selection: Selection(total: fallbackRows.length),
-                isSearching: false,
-                revision: state.revision + 1,
-              );
-              return true;
-            }
+      if (cleanPath.isNotEmpty) {
+        final dir = Directory(cleanPath);
+        if (dir.existsSync()) {
+          _iniciarVigilanciaDirectorio(cleanPath);
+          final entities = dir.listSync(followLinks: false);
+          final rows = <FileRow>[];
+          for (final e in entities) {
+            final isDir = e is Directory;
+            try {
+              final stat = e.statSync();
+              final name = e.path.split(RegExp(r'[\\/]')).last;
+              if (name.isEmpty) continue;
+              final ext = isDir ? '' : (name.contains('.') ? name.split('.').last : '');
+              rows.add(FileRow(
+                index: rows.length,
+                name: name,
+                path: cleanPath,
+                extension: ext,
+                size: stat.size,
+                mtime: stat.modified.millisecondsSinceEpoch ~/ 1000,
+                flags: isDir ? 1 : 0,
+              ));
+            } catch (_) {}
           }
-        } catch (e) {
-          debugPrint('Error en fallback directo: $e');
+
+          _ordenarFilas(rows, state.sortCol, state.ascending);
+
+          for (var i = 0; i < rows.length; i++) {
+            final r = rows[i];
+            rows[i] = FileRow(
+              index: i,
+              name: r.name,
+              path: r.path,
+              extension: r.extension,
+              size: r.size,
+              mtime: r.mtime,
+              flags: r.flags,
+            );
+          }
+
+          _cache.clear();
+          final pageSize = _cache.pageSize;
+          final numPages = (rows.length / pageSize).ceil();
+          for (var p = 0; p < numPages; p++) {
+            final start = p * pageSize;
+            final end = (start + pageSize).clamp(0, rows.length);
+            _cache.put(p, rows.sublist(start, end));
+          }
+
+          state = state.copyWith(
+            mode: ViewMode.browse,
+            browsePath: cleanPath,
+            history: historial,
+            historyIndex: indice,
+            generation: null,
+            totalCount: rows.length,
+            readyCount: rows.length,
+            elapsedMs: 1,
+            selection: Selection(total: rows.length),
+            isSearching: false,
+            revision: state.revision + 1,
+          );
+          return true;
         }
       }
+
+      _cancelarVigilanciaDirectorio();
+      final gen = cleanPath.isEmpty
+          ? await ffi.browseRoots(sortCol: state.sortCol, ascending: state.ascending)
+          : await ffi.browsePath(
+              path: cleanPath,
+              sortCol: state.sortCol,
+              ascending: state.ascending,
+              limit: _initialLimit,
+            );
+      final status = await ffi.searchStatus(generation: gen);
+      if (!mounted || seq != _seq) return false;
 
       _cache.clear();
       state = state.copyWith(
