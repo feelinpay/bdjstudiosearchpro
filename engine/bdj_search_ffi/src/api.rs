@@ -154,6 +154,8 @@ pub(crate) static MMAP_INDEX: Mutex<Option<MmapIndex>> = Mutex::new(None);
 static LAST: Mutex<Option<LastQuery>> = Mutex::new(None);
 static INDEX_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 static INDEX_GENERATION: AtomicU64 = AtomicU64::new(0);
+static INDEX_ENTRY_COUNT: AtomicU64 = AtomicU64::new(0);
+static INDEX_FILE_SIZE: AtomicU64 = AtomicU64::new(0);
 /// Último fallo al abrir el índice, para poder explicarlo.
 static LAST_PROBLEM: Mutex<Option<(u8, String)>> = Mutex::new(None);
 
@@ -337,16 +339,19 @@ pub fn engine_open(index_path_str: String) -> Result<(), String> {
         }
     };
 
-    let generation = match mmap.view() {
-        Ok(v) => v.header.generation,
+    let (generation, entry_count) = match mmap.view() {
+        Ok(v) => (v.header.generation, v.header.entry_count),
         Err(e) => {
             let detalle = format!("Formato de índice inválido: {e:?}");
             return Err(fallo(classify(&path, &detalle), detalle));
         }
     };
 
+    let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     *MMAP_INDEX.lock() = Some(mmap);
     INDEX_GENERATION.store(generation, Ordering::SeqCst);
+    INDEX_ENTRY_COUNT.store(entry_count, Ordering::SeqCst);
+    INDEX_FILE_SIZE.store(file_size, Ordering::SeqCst);
     *LAST_PROBLEM.lock() = None;
 
     // Y la capa que haya publicada, para no arrancar ciego a todo lo ocurrido
@@ -426,10 +431,17 @@ pub fn reload_if_changed() -> bool {
         return false;
     };
     let generation = view.header.generation;
-    let base_cambio = generation != INDEX_GENERATION.load(Ordering::SeqCst);
+    let entry_count = view.header.entry_count;
+    let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+    let base_cambio = generation != INDEX_GENERATION.load(Ordering::SeqCst)
+        || entry_count != INDEX_ENTRY_COUNT.load(Ordering::SeqCst)
+        || file_size != INDEX_FILE_SIZE.load(Ordering::SeqCst);
 
     if base_cambio {
         INDEX_GENERATION.store(generation, Ordering::SeqCst);
+        INDEX_ENTRY_COUNT.store(entry_count, Ordering::SeqCst);
+        INDEX_FILE_SIZE.store(file_size, Ordering::SeqCst);
         *MMAP_INDEX.lock() = Some(mmap);
         *INDEX_PATH.lock() = Some(path.clone());
         *LAST_PROBLEM.lock() = None;
@@ -488,6 +500,8 @@ pub fn engine_close() {
     *INDEX_PATH.lock() = None;
     *LAST_PROBLEM.lock() = None;
     INDEX_GENERATION.store(0, Ordering::SeqCst);
+    INDEX_ENTRY_COUNT.store(0, Ordering::SeqCst);
+    INDEX_FILE_SIZE.store(0, Ordering::SeqCst);
 }
 
 // ───────────────────────────────── Búsqueda ─────────────────────────────────

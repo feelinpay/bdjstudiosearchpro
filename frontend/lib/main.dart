@@ -912,23 +912,13 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
           children: [
             const TopMenuBar(),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: const BoxDecoration(
                 color: AppColors.surface,
                 border: Border(bottom: BorderSide(color: AppColors.border)),
               ),
               child: Row(
                 children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: Image.asset(
-                      'assets/images/logo.png',
-                      width: 24,
-                      height: 24,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
                   const Icon(Icons.search_rounded,
                       color: AppColors.primary, size: 22),
                   const SizedBox(width: 12),

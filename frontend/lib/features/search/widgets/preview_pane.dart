@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
 import '../models/file_row.dart';
+import '../providers/search_provider.dart';
 import '../providers/preview_provider.dart';
 
 /// Panel lateral derecho colapsable para previsualización de metadatos y contenido.
@@ -77,6 +78,39 @@ class PreviewPane extends ConsumerWidget {
                         padding: const EdgeInsets.all(16),
                         children: [
                           _buildPreviewHeader(row),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.primary,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(vertical: 8),
+                                    elevation: 0,
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                  ),
+                                  icon: Icon(
+                                    row.isDirectory ? Icons.folder_open_rounded : Icons.play_arrow_rounded,
+                                    size: 16,
+                                  ),
+                                  label: Text(
+                                    row.isDirectory ? 'Abrir carpeta' : 'Abrir archivo',
+                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                  ),
+                                  onPressed: () {
+                                    if (row.isDirectory) {
+                                      ref.read(searchProvider.notifier).openFolder(row.fullPath);
+                                    } else {
+                                      Process.run(Platform.isWindows ? 'explorer' : 'open', [row.fullPath]);
+                                    }
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
                           const SizedBox(height: 16),
                           if (preview.textContent != null) ...[
                             _buildTextPreview(preview.textContent!),

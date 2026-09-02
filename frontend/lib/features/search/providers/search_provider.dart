@@ -13,6 +13,7 @@ import '../models/row_cache.dart';
 import '../models/selection.dart';
 import '../models/view_mode.dart';
 import 'recent_folders_provider.dart';
+import 'preview_provider.dart';
 
 /// Qué está mostrando la tabla.
 enum ViewMode {
@@ -479,10 +480,80 @@ class SearchNotifier extends StateNotifier<SearchState> {
         }
       }
 
+      if (status.totalCount == 0 && cleanPath.isNotEmpty) {
+        try {
+          final dir = Directory(cleanPath);
+          if (dir.existsSync()) {
+            final entities = dir.listSync(followLinks: false);
+            if (entities.isNotEmpty) {
+              final fallbackRows = <FileRow>[];
+              for (final e in entities) {
+                final isDir = e is Directory;
+                final stat = e.statSync();
+                final name = e.path.split(RegExp(r'[\\/]')).last;
+                if (name.isEmpty) continue;
+                final ext = isDir ? '' : (name.contains('.') ? name.split('.').last : '');
+                fallbackRows.add(FileRow(
+                  index: fallbackRows.length,
+                  name: name,
+                  path: cleanPath,
+                  extension: ext,
+                  size: stat.size,
+                  mtime: stat.modified.millisecondsSinceEpoch ~/ 1000,
+                  flags: isDir ? 1 : 0,
+                ));
+              }
+              fallbackRows.sort((a, b) {
+                if (a.isDirectory != b.isDirectory) {
+                  return a.isDirectory ? -1 : 1;
+                }
+                return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+              });
+              for (var i = 0; i < fallbackRows.length; i++) {
+                final r = fallbackRows[i];
+                fallbackRows[i] = FileRow(
+                  index: i,
+                  name: r.name,
+                  path: r.path,
+                  extension: r.extension,
+                  size: r.size,
+                  mtime: r.mtime,
+                  flags: r.flags,
+                );
+              }
+              _cache.clear();
+              final pageSize = _cache.pageSize;
+              final numPages = (fallbackRows.length / pageSize).ceil();
+              for (var p = 0; p < numPages; p++) {
+                final start = p * pageSize;
+                final end = (start + pageSize).clamp(0, fallbackRows.length);
+                _cache.put(p, fallbackRows.sublist(start, end));
+              }
+              state = state.copyWith(
+                mode: ViewMode.browse,
+                browsePath: cleanPath,
+                history: historial,
+                historyIndex: indice,
+                generation: gen,
+                totalCount: fallbackRows.length,
+                readyCount: fallbackRows.length,
+                elapsedMs: 1,
+                selection: Selection(total: fallbackRows.length),
+                isSearching: false,
+                revision: state.revision + 1,
+              );
+              return true;
+            }
+          }
+        } catch (e) {
+          debugPrint('Error en fallback directo: $e');
+        }
+      }
+
       _cache.clear();
       state = state.copyWith(
         mode: ViewMode.browse,
-        browsePath: path,
+        browsePath: cleanPath,
         history: historial,
         historyIndex: indice,
         generation: gen,
@@ -597,6 +668,13 @@ class SearchNotifier extends StateNotifier<SearchState> {
         ));
       }
       _cache.put(page, filas);
+      final selIdx = state.selection.firstIndex;
+      if (selIdx != null && selIdx >= offset && selIdx < offset + batch.count) {
+        final r = rowAt(selIdx);
+        if (r != null && ref != null) {
+          ref!.read(previewProvider.notifier).inspectFile(r);
+        }
+      }
       state = state.copyWith(revision: state.revision + 1);
     } catch (e) {
       _cache.failed(page);
@@ -641,6 +719,10 @@ class SearchNotifier extends StateNotifier<SearchState> {
             ? s.toggle(index)
             : s.single(index);
     state = state.copyWith(selection: nueva);
+    final row = rowAt(index);
+    if (row != null && ref != null) {
+      ref!.read(previewProvider.notifier).inspectFile(row);
+    }
   }
 
   /// Selecciona **todo el resultado**, no solo lo que está cargado.

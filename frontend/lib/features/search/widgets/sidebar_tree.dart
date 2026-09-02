@@ -210,9 +210,9 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
       ),
       child: Material(
         color: Colors.transparent,
-        child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+        child: ListView(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          children: [
           // Encabezado de Acceso Rápido
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -387,23 +387,14 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             ),
           ),
 
-          Expanded(
-            child: serviceStatus == null
-                ? const SizedBox.shrink()
-                : ListView(
-                    children: [
-                      for (var i = 0;
-                          i < serviceStatus.volumePrefixes.length;
-                          i++)
-                        ..._raizVolumen(i, serviceStatus),
-                    ],
-                  ),
-          ),
+          if (serviceStatus != null)
+            for (var i = 0; i < serviceStatus.volumePrefixes.length; i++)
+              ..._raizVolumen(i, serviceStatus),
         ],
       ),
     ),
-    );
-  }
+  );
+}
 
   /// La rama raíz de un volumen: su propia fila y, al expandirla, el árbol de
   /// carpetas que cuelga de ella.

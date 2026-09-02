@@ -23,9 +23,67 @@ class TopMenuBar extends ConsumerWidget {
     final ops = ref.read(fileOpsProvider.notifier);
     final haySeleccion = searchState.selection.isNotEmpty;
 
-    return MenuBar(
-      children: [
-        SubmenuButton(
+    return Container(
+      height: 32,
+      width: double.infinity,
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      child: Row(
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: 12, right: 8),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: Image.asset(
+                    'assets/images/logo.png',
+                    width: 16,
+                    height: 16,
+                    fit: BoxFit.cover,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'BDJ SEARCH PRO',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.6,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(
+            height: 16,
+            child: VerticalDivider(width: 12, color: AppColors.border),
+          ),
+          Expanded(
+            child: Theme(
+              data: Theme.of(context).copyWith(
+                menuBarTheme: MenuBarThemeData(
+                  style: MenuStyle(
+                    backgroundColor: WidgetStateProperty.all(Colors.transparent),
+                    elevation: WidgetStateProperty.all(0),
+                    padding: WidgetStateProperty.all(EdgeInsets.zero),
+                  ),
+                ),
+                menuButtonTheme: MenuButtonThemeData(
+                  style: ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                    padding: WidgetStateProperty.all(const EdgeInsets.symmetric(horizontal: 8, vertical: 2)),
+                    textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
+                  ),
+                ),
+              ),
+              child: MenuBar(
+                children: [
+                  SubmenuButton(
           menuChildren: [
             MenuItemButton(
               shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true),
@@ -237,8 +295,13 @@ class TopMenuBar extends ConsumerWidget {
         ),
       ],
       child: const Text('Marcadores'),
+            ),
+          ],
+        ),
+      ),
     ),
   ],
+),
 );
   }
 

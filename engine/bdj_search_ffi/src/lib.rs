@@ -47,5 +47,24 @@ mod tests {
         for i in 0..filas.names.len() {
             println!("  {} · {}", filas.names[i], filas.paths[i]);
         }
+
+        for path in [
+            r"C:\Users\David Zapata\Downloads",
+            r"C:\Users\David Zapata\Documents",
+            r"C:\Users\David Zapata",
+            r"C:\Users",
+            r"C:\",
+        ] {
+            let bg = api::browse_path(path.to_string(), 0, true, 50);
+            let bst = api::search_status(bg);
+            println!(
+                "BROWSE '{path}' -> {} coincidencias, {} filas",
+                bst.total_count, bst.ready_count
+            );
+            let bfilas = api::rows(bg, 0, 10);
+            for i in 0..bfilas.names.len() {
+                println!("    [{}] {} ({})", if (bfilas.flags[i] & 1) != 0 { "DIR" } else { "FILE" }, bfilas.names[i], bfilas.paths[i]);
+            }
+        }
     }
 }
