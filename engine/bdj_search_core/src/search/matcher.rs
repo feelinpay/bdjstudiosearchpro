@@ -233,4 +233,18 @@ mod tests {
         assert!(m.matches(b"FLAC", false));
         assert!(!m.matches(b"Flacx", false));
     }
+
+    #[test]
+    fn test_wildcard_extension_y_prefijo() {
+        let m_ext = WildcardMatcher::new("*.mp3");
+        assert!(m_ext.matches(b"track_01.mp3", false));
+        assert!(m_ext.matches(b"TRACK_01.MP3", false));
+        assert!(!m_ext.matches(b"track_01.wav", false));
+
+        let m_kick = WildcardMatcher::new("Kick*.wav");
+        assert!(m_kick.matches(b"Kick_909_punch.wav", false));
+        assert!(m_kick.matches(b"kick.wav", false));
+        assert!(m_kick.matches(b"KICK_SUB.WAV", false));
+        assert!(!m_kick.matches(b"Snare_909.wav", false));
+    }
 }
