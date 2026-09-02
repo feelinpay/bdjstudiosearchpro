@@ -55,9 +55,30 @@ impl<'a> Lexer<'a> {
                     tokens.push(Token::Quoted(s));
                 }
                 _ => {
+                    // Una palabra llega hasta el primer espacio... salvo que se
+                    // abran comillas.
+                    //
+                    // `ruta:"Mis Sets"` se partía en dos piezas, «ruta:"Mis» y
+                    // «Sets"», así que el filtro buscaba una ruta llamada
+                    // literalmente `"Mis` y devolvía cero resultados sin dar
+                    // ningún error. Con rutas de Windows —que casi siempre
+                    // llevan espacios: `C:\Users\David Zapata\...`— era el caso
+                    // normal, no el raro.
+                    //
+                    // Dentro de comillas los espacios forman parte del valor y
+                    // solo la comilla de cierre lo termina.
                     let mut s = String::new();
+                    let mut dentro_de_comillas = false;
                     while let Some(&ch) = self.chars.peek() {
-                        if ch.is_whitespace() || ch == '|' || ch == ')' || ch == '(' {
+                        if ch == '"' {
+                            dentro_de_comillas = !dentro_de_comillas;
+                            s.push(ch);
+                            self.chars.next();
+                            continue;
+                        }
+                        if !dentro_de_comillas
+                            && (ch.is_whitespace() || ch == '|' || ch == ')' || ch == '(')
+                        {
                             break;
                         }
                         s.push(ch);

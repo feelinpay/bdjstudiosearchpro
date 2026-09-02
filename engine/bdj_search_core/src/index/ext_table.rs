@@ -46,6 +46,19 @@ impl InternedExtensions {
         self.ext_to_id.get(&clean).copied()
     }
 
+    /// Cuántas extensiones distintas hay internadas.
+    ///
+    /// Ordenar por extensión necesita una tabla de rangos con una casilla por
+    /// identificador; sin este dato habría que recorrer el índice entero para
+    /// averiguar su tamaño.
+    pub fn len(&self) -> usize {
+        self.id_to_ext.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.id_to_ext.is_empty()
+    }
+
     pub fn get_name(&self, id: u16) -> Option<&str> {
         self.id_to_ext.get(id as usize).map(|s| s.as_str())
     }

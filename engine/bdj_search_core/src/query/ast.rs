@@ -8,6 +8,7 @@ pub enum QueryAst {
     DateCreated { min: Option<u32>, max: Option<u32> },
     Path(String),
     Parent(String),
+    ParentId(u32),
     FileType(String),
     Regex(String),
     Case(String),

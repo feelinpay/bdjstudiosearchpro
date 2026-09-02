@@ -1,6 +1,6 @@
 use super::ast::QueryAst;
 use crate::index::view::IndexView;
-use crate::search::matcher::SubstringMatcher;
+use crate::search::matcher::{SubstringMatcher, WildcardMatcher};
 use regex::Regex;
 
 pub struct QueryEvaluator;
@@ -13,8 +13,11 @@ impl QueryEvaluator {
                 if term.is_empty() {
                     return true;
                 }
-                let matcher = SubstringMatcher::new(term);
                 let is_non_ascii = (view.flags[idx] & crate::index::layout::FLAG_NON_ASCII) != 0;
+                if WildcardMatcher::contains_wildcard(term) {
+                    return WildcardMatcher::new(term).matches(view.get_name_bytes(idx), is_non_ascii);
+                }
+                let matcher = SubstringMatcher::new(term);
                 matcher.matches(view.get_name_bytes(idx), is_non_ascii)
             }
             QueryAst::Exact(exact) => {
@@ -79,6 +82,7 @@ impl QueryEvaluator {
                     false
                 }
             }
+            QueryAst::ParentId(expected_id) => view.parent[idx] == *expected_id,
             QueryAst::FileType(type_name) => Self::matches_file_type(type_name, view, idx),
             QueryAst::Regex(pattern) => {
                 if let Ok(re) = Regex::new(pattern) {
@@ -106,127 +110,115 @@ impl QueryEvaluator {
         }
     }
 
-    /// Evaluates if an index entry matches the CompiledQueryAst.
-    #[inline(always)]
-    pub fn matches_compiled(ast: &crate::query::CompiledQueryAst, view: &IndexView, idx: usize) -> bool {
-        ast.matches(view, idx)
-    }
-
-
+    /// Comprueba si una entrada pertenece a un grupo de tipo (audio, vídeo…).
+    ///
+    /// La lista de extensiones de cada grupo vive en un único sitio,
+    /// `query::compiled::file_type_extensions`, para que el evaluador y la
+    /// barra de filtros de la interfaz no puedan discrepar.
     pub(crate) fn matches_file_type(type_name: &str, view: &IndexView, idx: usize) -> bool {
-        let is_dir = view.is_dir(idx);
+        let lowered = type_name.to_ascii_lowercase();
+        if lowered == "carpetas" || lowered == "carpeta" || lowered == "folder" {
+            return view.is_dir(idx);
+        }
+        if view.is_dir(idx) {
+            return false;
+        }
         let ext = view.get_extension(idx);
+        if ext.is_empty() {
+            return false;
+        }
+        match crate::query::compiled::file_type_extensions(&lowered) {
+            Some(list) => list.iter().any(|e| e.eq_ignore_ascii_case(ext)),
+            None => false,
+        }
+    }
 
-        match type_name {
-            "audio" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "wav"
-                            | "flac"
-                            | "aiff"
-                            | "aif"
-                            | "mp3"
-                            | "m4a"
-                            | "ogg"
-                            | "opus"
-                            | "wma"
-                            | "alac"
-                            | "ape"
-                            | "wv"
-                            | "aac"
-                    )
+    /// ¿Toda entrada que cumple `new` cumple también `old`?
+    ///
+    /// Si la respuesta es sí, el resultado de `new` es un subconjunto del de
+    /// `old` y basta con volver a filtrar el resultado anterior en lugar de
+    /// recorrer el índice entero. Es lo que hace que teclear la sexta letra
+    /// cueste microsegundos.
+    ///
+    /// La versión anterior exigía que los términos viejos aparecieran
+    /// **idénticos** en la consulta nueva. Al teclear dentro de una palabra de
+    /// una consulta de varias —«michael bil» → «michael bill»— el término viejo
+    /// ya no estaba literal y se caía al recorrido completo. Justo el caso más
+    /// común: artista y título.
+    pub fn implied_by(new_ast: &QueryAst, old_ast: &QueryAst) -> bool {
+        if new_ast == old_ast {
+            return true;
+        }
+
+        // Cumplir un Y lógico es cumplir todas sus partes.
+        if let QueryAst::And(olds) = old_ast {
+            return olds.iter().all(|o| Self::implied_by(new_ast, o));
+        }
+
+        // Basta con que una parte del Y lógico nuevo implique lo viejo.
+        if let QueryAst::And(news) = new_ast {
+            return news.iter().any(|n| Self::implied_by(n, old_ast));
+        }
+
+        match (new_ast, old_ast) {
+            // «michael bill» contiene «michael bil»: todo nombre que contenga
+            // el término nuevo contiene también el viejo.
+            (QueryAst::Term(n), QueryAst::Term(o))
+            | (QueryAst::Exact(n), QueryAst::Exact(o))
+            | (QueryAst::Exact(n), QueryAst::Term(o)) => {
+                !o.is_empty() && n.to_lowercase().contains(&o.to_lowercase())
             }
-            "video" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "mp4"
-                            | "mov"
-                            | "avi"
-                            | "mkv"
-                            | "m4v"
-                            | "webm"
-                            | "mpg"
-                            | "mpeg"
-                            | "wmv"
-                            | "flv"
-                    )
+            (QueryAst::Path(n), QueryAst::Path(o)) | (QueryAst::Parent(n), QueryAst::Parent(o)) => {
+                !o.is_empty() && n.to_lowercase().contains(&o.to_lowercase())
             }
-            "imagen" | "image" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "jpg"
-                            | "jpeg"
-                            | "png"
-                            | "gif"
-                            | "webp"
-                            | "heic"
-                            | "tiff"
-                            | "bmp"
-                            | "svg"
-                            | "psd"
-                    )
-            }
-            "documentos" | "docs" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "pdf" | "docx" | "doc" | "txt" | "rtf" | "odt" | "xlsx" | "pptx" | "md"
-                    )
-            }
-            "proyectos" | "dj" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "als"
-                            | "flp"
-                            | "ptx"
-                            | "cpr"
-                            | "logicx"
-                            | "rpp"
-                            | "nki"
-                            | "nkm"
-                            | "cue"
-                            | "m3u"
-                            | "m3u8"
-                            | "xml"
-                    )
-            }
-            "comprimidos" | "zip" => {
-                !is_dir
-                    && matches!(
-                        ext,
-                        "zip" | "rar" | "7z" | "tar" | "gz" | "bz2" | "xz"
-                    )
-            }
-            "apps" | "aplicaciones" => {
-                !is_dir && matches!(ext, "exe" | "msi" | "dll" | "app" | "dmg" | "pkg")
-            }
-            "carpetas" | "folder" => is_dir,
+            // Un rango más estrecho implica al más ancho.
+            (
+                QueryAst::Size { min: nmin, max: nmax },
+                QueryAst::Size { min: omin, max: omax },
+            ) => Self::range_narrows_u64(*nmin, *nmax, *omin, *omax),
+            (
+                QueryAst::DateModified { min: nmin, max: nmax },
+                QueryAst::DateModified { min: omin, max: omax },
+            )
+            | (
+                QueryAst::DateCreated { min: nmin, max: nmax },
+                QueryAst::DateCreated { min: omin, max: omax },
+            ) => Self::range_narrows_u32(*nmin, *nmax, *omin, *omax),
             _ => false,
         }
     }
 
-    /// Determines if a new AST is monotonically more restrictive than an old AST.
-    /// Used to validate if we can refine from the previous search result set.
-    pub fn is_monotonically_restrictive(old_ast: &QueryAst, new_ast: &QueryAst) -> bool {
-        match (old_ast, new_ast) {
-            (QueryAst::Term(old_t), QueryAst::Term(new_t)) => {
-                new_t.starts_with(old_t)
-            }
-            (QueryAst::Exact(old_e), QueryAst::Exact(new_e)) => {
-                new_e.starts_with(old_e)
-            }
-            (QueryAst::And(old_terms), QueryAst::And(new_terms)) => {
-                // New AND query has all old terms plus additional terms or prefixes
-                if new_terms.len() < old_terms.len() {
-                    return false;
-                }
-                old_terms.iter().all(|ot| new_terms.contains(ot))
-            }
-            _ => false,
-        }
+    fn range_narrows_u64(
+        nmin: Option<u64>,
+        nmax: Option<u64>,
+        omin: Option<u64>,
+        omax: Option<u64>,
+    ) -> bool {
+        let min_ok = match omin {
+            None => true,
+            Some(o) => nmin.is_some_and(|n| n >= o),
+        };
+        let max_ok = match omax {
+            None => true,
+            Some(o) => nmax.is_some_and(|n| n <= o),
+        };
+        min_ok && max_ok
+    }
+
+    fn range_narrows_u32(
+        nmin: Option<u32>,
+        nmax: Option<u32>,
+        omin: Option<u32>,
+        omax: Option<u32>,
+    ) -> bool {
+        let min_ok = match omin {
+            None => true,
+            Some(o) => nmin.is_some_and(|n| n >= o),
+        };
+        let max_ok = match omax {
+            None => true,
+            Some(o) => nmax.is_some_and(|n| n <= o),
+        };
+        min_ok && max_ok
     }
 }

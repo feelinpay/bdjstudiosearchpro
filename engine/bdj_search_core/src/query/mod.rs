@@ -5,5 +5,6 @@ pub mod lexer;
 pub mod parser;
 
 pub use ast::QueryAst;
-pub use compiled::CompiledQueryAst;
+pub use compiled::{CompiledQuery, MatchScratch, file_type_extensions};
+pub use eval::QueryEvaluator;
 pub use parser::Parser;

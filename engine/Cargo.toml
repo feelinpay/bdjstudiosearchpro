@@ -6,6 +6,7 @@ members = [
     "bdj_search_ipc",
     "bdj_search_indexer",
     "bdj_search_ffi",
+    "bdj_search_fsops",
 ]
 
 [workspace.package]

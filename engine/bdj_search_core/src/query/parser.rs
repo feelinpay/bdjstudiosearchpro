@@ -97,7 +97,30 @@ impl Parser {
         }
     }
 
+    /// Quita las comillas que envuelven el valor de una función.
+    ///
+    /// La sintaxis documentada admite `ruta:"Mis Sets"` para valores con
+    /// espacios, pero las comillas llegaban hasta aquí dentro de la cadena: el
+    /// filtro buscaba literalmente `"Mis Sets"` —con comillas— y no casaba
+    /// nunca. No daba error, simplemente devolvía cero resultados, que es la
+    /// peor forma de fallar: parece que no hay nada.
+    ///
+    /// Solo se quitan si envuelven el valor entero, para que una comilla en
+    /// medio de un nombre siga contando como parte del nombre.
+    fn unquote(value: &str) -> &str {
+        let bytes = value.as_bytes();
+        if bytes.len() >= 2 {
+            let primero = bytes[0];
+            let ultimo = bytes[bytes.len() - 1];
+            if (primero == b'"' && ultimo == b'"') || (primero == b'\'' && ultimo == b'\'') {
+                return &value[1..value.len() - 1];
+            }
+        }
+        value
+    }
+
     fn parse_function(&self, name: &str, value: &str) -> QueryAst {
+        let value = Self::unquote(value);
         match name {
             "ext" => {
                 let exts = value
@@ -111,6 +134,13 @@ impl Parser {
             "dc" | "creado" => Self::parse_date_query(value, false),
             "path" | "ruta" => QueryAst::Path(value.to_string()),
             "parent" | "carpeta" => QueryAst::Parent(value.to_string()),
+            "pid" => {
+                if let Ok(id) = value.parse::<u32>() {
+                    QueryAst::ParentId(id)
+                } else {
+                    QueryAst::Term(format!("{}:{}", name, value))
+                }
+            }
             "type" | "tipo" => QueryAst::FileType(value.to_ascii_lowercase()),
             "regex" => QueryAst::Regex(value.to_string()),
             "case" | "may" => QueryAst::Case(value.to_string()),
@@ -209,6 +239,44 @@ impl Parser {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod pruebas_de_comillas {
+    use super::*;
+
+    #[test]
+    fn el_valor_entrecomillado_pierde_las_comillas() {
+        // Con las comillas dentro del valor, `ruta:"Mis Sets"` buscaba
+        // literalmente «"Mis Sets"» y devolvía cero resultados sin decir nada.
+        assert_eq!(
+            Parser::parse("ruta:\"Mis Sets\""),
+            QueryAst::Path("Mis Sets".into())
+        );
+        assert_eq!(
+            Parser::parse("ruta:\"C:\\Musica\" wav"),
+            QueryAst::And(vec![
+                QueryAst::Path("C:\\Musica".into()),
+                QueryAst::Term("wav".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn una_comilla_en_medio_sigue_siendo_parte_del_nombre() {
+        assert_eq!(
+            Parser::parse("ruta:Rock\"n\"Roll"),
+            QueryAst::Path("Rock\"n\"Roll".into())
+        );
+    }
+
+    #[test]
+    fn sin_comillas_todo_sigue_igual() {
+        assert_eq!(
+            Parser::parse("tipo:audio"),
+            QueryAst::FileType("audio".into())
+        );
     }
 }
 

@@ -27,6 +27,13 @@ pub struct OverlayIndex {
     pub tombstones: HashSet<u32>,
     /// Frontera entre el espacio de identificadores del base y el de esta capa.
     pub base_count: u32,
+    /// Entradas de **esta capa** que se han borrado antes de compactar.
+    ///
+    /// Se guardan aparte de `tombstones` porque una lápida se refiere siempre a
+    /// un identificador del base: usarla para uno de la capa borraría a un
+    /// tercero. Sin esta lista, un archivo creado y borrado entre dos
+    /// compactaciones se quedaba en el índice para siempre.
+    pub dead_overlay: HashSet<u32>,
 }
 
 impl OverlayIndex {
@@ -35,6 +42,7 @@ impl OverlayIndex {
             builder: IndexBuilder::new(),
             tombstones: HashSet::new(),
             base_count: 0,
+            dead_overlay: HashSet::new(),
         }
     }
 
@@ -44,6 +52,7 @@ impl OverlayIndex {
             builder: IndexBuilder::new(),
             tombstones: HashSet::new(),
             base_count,
+            dead_overlay: HashSet::new(),
         }
     }
 
@@ -72,14 +81,33 @@ impl OverlayIndex {
         self.base_count + local
     }
 
-    /// Marca una entrada del base como anulada.
+    /// Anula una entrada, venga del base o de esta capa.
     ///
-    /// Un identificador de esta misma capa se ignora: una entrada creada y
-    /// borrada entre dos compactaciones no llega a existir para nadie, y
-    /// tratarla como lápida del base borraría a un tercero.
+    /// Un identificador del base se apunta como lápida. Uno de la capa va a una
+    /// lista aparte: tratarlo como lápida del base borraría a un tercero, que es
+    /// justo lo que hacía la versión anterior de este método al confundir los
+    /// dos espacios de identificadores.
     pub fn mark_deleted(&mut self, unified_id: u32) {
         if unified_id < self.base_count {
             self.tombstones.insert(unified_id);
+        } else {
+            let local = unified_id - self.base_count;
+            if (local as usize) < self.builder.count() {
+                self.dead_overlay.insert(local);
+            }
+        }
+    }
+
+    /// ¿Sigue viva esta entrada?
+    pub fn is_alive(&self, base: Option<&super::view::IndexView<'_>>, unified_id: u32) -> bool {
+        if unified_id < self.base_count {
+            !self.tombstones.contains(&unified_id)
+                && base
+                    .map(|v| v.is_alive(unified_id as usize))
+                    .unwrap_or(false)
+        } else {
+            let local = unified_id - self.base_count;
+            (local as usize) < self.builder.count() && !self.dead_overlay.contains(&local)
         }
     }
 
@@ -93,7 +121,7 @@ impl OverlayIndex {
 
     /// Hay trabajo pendiente que publicar.
     pub fn has_changes(&self) -> bool {
-        self.overlay_count() > 0 || !self.tombstones.is_empty()
+        self.overlay_count() > 0 || !self.tombstones.is_empty() || !self.dead_overlay.is_empty()
     }
 
     /// Umbral por volumen de cambios: el 5 % del base, con un mínimo de 500.
@@ -128,6 +156,150 @@ impl OverlayIndex {
             }
             Some((self.builder.name_at(local), self.builder.parents[local as usize]))
         }
+    }
+
+    /// Hijos directos de un identificador unificado, base y capa juntos.
+    ///
+    /// Los del base salen de la columna comprimida por filas —una rodaja de
+    /// memoria ya mapeada—; los de la capa, de un recorrido de sus padres, que
+    /// son pocos por definición. Las entradas anuladas no aparecen.
+    pub fn children_of(
+        &self,
+        base: Option<&super::view::IndexView<'_>>,
+        id: u32,
+    ) -> Vec<u32> {
+        let mut out = Vec::new();
+        if id < self.base_count
+            && let Some(view) = base
+        {
+            for &c in view.children(id as usize) {
+                if !self.tombstones.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        for (local, &p) in self.builder.parents.iter().enumerate() {
+            if p == id && !self.dead_overlay.contains(&(local as u32)) {
+                out.push(self.base_count + local as u32);
+            }
+        }
+        out
+    }
+
+    /// Traduce una ruta absoluta al identificador unificado que la representa.
+    ///
+    /// Es la operación inversa de `resolve_path`, y hace falta cuando el cambio
+    /// no viene del sistema de archivos sino de la propia aplicación: al copiar
+    /// un archivo, lo que se conoce es su ruta, no su número de referencia.
+    ///
+    /// La comparación de nombres ignora mayúsculas porque ni NTFS ni APFS las
+    /// distinguen por defecto.
+    pub fn resolve_id_by_path(
+        &self,
+        base: Option<&super::view::IndexView<'_>>,
+        path: &str,
+    ) -> Option<u32> {
+        let (prefix, rest) = self.split_mount_prefix(base, path)?;
+        let mut current = self.find_volume_root(base, &prefix)?;
+
+        for segment in rest
+            .split(['\\', '/'])
+            .filter(|s| !s.is_empty() && *s != ".")
+        {
+            let mut siguiente = None;
+            for child in self.children_of(base, current) {
+                let Some((name, _)) = self.entry_of(base, child) else {
+                    continue;
+                };
+                if name.eq_ignore_ascii_case(segment) || name == segment {
+                    siguiente = Some(child);
+                    break;
+                }
+            }
+            current = siguiente?;
+        }
+        Some(current)
+    }
+
+    /// Compara dos trozos de ruta ignorando mayúsculas y tratando `/` y `\`
+    /// como el mismo separador.
+    ///
+    /// La aplicación puede recibir rutas escritas de cualquiera de las dos
+    /// formas —de un arrastre, del portapapeles, de la barra de dirección— y
+    /// todas apuntan al mismo sitio.
+    fn prefix_matches(a: &str, b: &str) -> bool {
+        let norm = |c: char| {
+            if c == '/' {
+                '\\'
+            } else {
+                c.to_ascii_lowercase()
+            }
+        };
+        a.chars().map(norm).eq(b.chars().map(norm))
+    }
+
+    /// Separa el prefijo de montaje conocido más largo que encaje con `path`.
+    fn split_mount_prefix(
+        &self,
+        base: Option<&super::view::IndexView<'_>>,
+        path: &str,
+    ) -> Option<(String, String)> {
+        let mut mejor: Option<&str> = None;
+        let mut tablas: Vec<&super::vol_table::VolumeTable> = vec![&self.builder.vol_table];
+        if let Some(v) = base {
+            tablas.push(&v.vol_table);
+        }
+        for tabla in tablas {
+            for vol in &tabla.volumes {
+                let p = vol.mount_prefix.as_str();
+                if path.is_char_boundary(p.len())
+                    && path.len() >= p.len()
+                    && Self::prefix_matches(&path[..p.len()], p)
+                    && mejor.map(|m| p.len() > m.len()).unwrap_or(true)
+                {
+                    mejor = Some(p);
+                }
+            }
+        }
+        let prefix = mejor?;
+        Some((prefix.to_string(), path[prefix.len()..].to_string()))
+    }
+
+    /// Raíz de un volumen: entrada sin padre cuyo volumen corresponde al prefijo.
+    fn find_volume_root(
+        &self,
+        base: Option<&super::view::IndexView<'_>>,
+        prefix: &str,
+    ) -> Option<u32> {
+        let vol_id = self
+            .builder
+            .vol_table
+            .volumes
+            .iter()
+            .chain(base.iter().flat_map(|v| v.vol_table.volumes.iter()))
+            .find(|v| Self::prefix_matches(&v.mount_prefix, prefix))
+            .map(|v| v.id)?;
+
+        for (local, &p) in self.builder.parents.iter().enumerate() {
+            if p == u32::MAX
+                && self.builder.volumes[local] == vol_id
+                && !self.dead_overlay.contains(&(local as u32))
+            {
+                return Some(self.base_count + local as u32);
+            }
+        }
+        if let Some(view) = base {
+            for i in 0..view.entry_count() {
+                let id = i as u32;
+                if view.parent[i] == u32::MAX
+                    && view.volume[i] == vol_id
+                    && !self.tombstones.contains(&id)
+                {
+                    return Some(id);
+                }
+            }
+        }
+        None
     }
 
     /// Reconstruye la ruta de un identificador unificado.
@@ -235,6 +407,10 @@ impl OverlayIndex {
         remap.resize(self.base_count as usize + overlay_count, u32::MAX);
 
         for idx in 0..overlay_count {
+            // Lo creado y borrado entre dos compactaciones no llega a publicarse.
+            if self.dead_overlay.contains(&(idx as u32)) {
+                continue;
+            }
             let new_id = new_builder.add_entry(
                 u32::MAX,
                 self.builder.name_at(idx as u32),
@@ -277,6 +453,7 @@ impl OverlayIndex {
         self.builder = IndexBuilder::new();
         self.builder.vol_table = vol_table;
         self.tombstones.clear();
+        self.dead_overlay.clear();
         self.base_count = new_builder.count() as u32;
 
         Ok(written)

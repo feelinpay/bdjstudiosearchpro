@@ -315,9 +315,70 @@ impl IndexBuilder {
         });
     }
 
+    /// Permutación inversa de `name_order`: `name_rank[id]` es la posición
+    /// alfabética de `id`.
+    ///
+    /// Ordenar un resultado por nombre pasa así a ser ordenar por una clave
+    /// entera de 4 bytes que ya está en el índice. Antes había que recorrer
+    /// `name_order` entera —diez millones de posiciones— filtrando por un mapa
+    /// de bits, aunque el resultado fueran tres filas.
+    fn compute_name_rank(&self) -> Vec<u32> {
+        let mut rank = vec![0u32; self.name_order.len()];
+        for (pos, &id) in self.name_order.iter().enumerate() {
+            let i = id as usize;
+            if i < rank.len() {
+                rank[i] = pos as u32;
+            }
+        }
+        rank
+    }
+
+    /// Lista de hijos de cada entrada en formato comprimido por filas.
+    ///
+    /// Devuelve `(desplazamientos, hijos)`: los hijos de `i` son
+    /// `hijos[desplazamientos[i]..desplazamientos[i + 1]]`, ordenados por
+    /// identificador. Es una ordenación por conteo en dos pasadas, sin
+    /// comparaciones.
+    ///
+    /// Con esto, abrir una carpeta es leer un rango contiguo de memoria; sin
+    /// esto haría falta recorrer el índice entero o preguntarle al disco.
+    fn compute_children(&self) -> (Vec<u32>, Vec<u32>) {
+        let n = self.parents.len();
+        // Una posición extra para cerrar el último rango.
+        let mut offsets = vec![0u32; n + 1];
+        if n == 0 {
+            return (offsets, Vec::new());
+        }
+
+        let mut total = 0usize;
+        for &p in &self.parents {
+            if p != u32::MAX && (p as usize) < n {
+                offsets[p as usize + 1] += 1;
+                total += 1;
+            }
+        }
+        for i in 0..n {
+            offsets[i + 1] += offsets[i];
+        }
+
+        let mut cursor = offsets.clone();
+        let mut children = vec![0u32; total];
+        for (child, &p) in self.parents.iter().enumerate() {
+            if p != u32::MAX && (p as usize) < n {
+                let slot = cursor[p as usize] as usize;
+                children[slot] = child as u32;
+                cursor[p as usize] += 1;
+            }
+        }
+
+        (offsets, children)
+    }
+
     /// Writes the index to any `io::Write` sink, returning total bytes written.
     pub fn write_to<W: Write>(&mut self, writer: &mut W) -> io::Result<usize> {
         self.compute_name_order();
+        let name_rank = self.compute_name_rank();
+        let (child_off, child_idx) = self.compute_children();
 
         let count = self.count() as u64;
         let arena_bytes = self.arena.as_slice();
@@ -355,6 +416,9 @@ impl IndexBuilder {
         assign_section(SectionId::NameArena, arena_bytes.len());
         assign_section(SectionId::ExtTable, ext_bytes.len());
         assign_section(SectionId::VolTable, vol_bytes.len());
+        assign_section(SectionId::NameRank, name_rank.len() * 4);
+        assign_section(SectionId::ChildOff, child_off.len() * 4);
+        assign_section(SectionId::ChildIdx, child_idx.len() * 4);
 
         let mut header = Header {
             magic: *MAGIC,
@@ -406,8 +470,22 @@ impl IndexBuilder {
         write_aligned(writer, arena_bytes)?;
         write_aligned(writer, &ext_bytes)?;
         write_aligned(writer, &vol_bytes)?;
+        write_aligned(writer, bytemuck::cast_slice(&name_rank))?;
+        write_aligned(writer, bytemuck::cast_slice(&child_off))?;
+        write_aligned(writer, bytemuck::cast_slice(&child_idx))?;
 
         writer.flush()?;
         Ok(bytes_written)
     }
+}
+
+/// Garantiza que el archivo de índice tenga permisos restrictivos (solo lectura/escritura del propietario).
+pub fn set_restrictive_permissions(_path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(_path, perms);
+    }
+    Ok(())
 }
