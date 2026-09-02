@@ -14,7 +14,7 @@ fn test_named_pipe_ipc_roundtrip() {
 
         // Receive Command from client
         let cmd = server.read_command().expect("Server read command");
-        assert_eq!(cmd, IpcCommand::RescanVolume { volume_id: 2 });
+        assert_eq!(cmd, IpcCommand::RescanVolume { mount_prefix: "C:\\".to_string() });
 
         // Send Event back to client
         let evt = IpcEvent::IndexUpdated {
@@ -32,7 +32,7 @@ fn test_named_pipe_ipc_roundtrip() {
     let client = PipeClient::connect(pipe_name).expect("Client connect must succeed");
 
     // Client sends Command
-    let cmd = IpcCommand::RescanVolume { volume_id: 2 };
+    let cmd = IpcCommand::RescanVolume { mount_prefix: "C:\\".to_string() };
     client.send_command(&cmd).expect("Client send command");
 
     // Client reads Event

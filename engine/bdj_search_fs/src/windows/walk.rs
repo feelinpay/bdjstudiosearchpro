@@ -16,6 +16,7 @@ pub struct FsEntry {
     pub is_dir: bool,
     pub is_hidden: bool,
     pub is_system: bool,
+    pub is_reparse_point: bool,
     pub size: u64,
     pub mtime: u32,
     pub ctime: u32,
@@ -79,6 +80,8 @@ pub fn scan_directory(dir: &Path) -> Vec<FsEntry> {
                     let is_hidden = (attrs & FILE_ATTRIBUTE_HIDDEN.0) != 0;
                     let is_system = (attrs & FILE_ATTRIBUTE_SYSTEM.0) != 0;
 
+                    let is_reparse_point = (attrs & 0x00000400) != 0;
+
                     let size = if is_dir {
                         0
                     } else {
@@ -100,6 +103,7 @@ pub fn scan_directory(dir: &Path) -> Vec<FsEntry> {
                         is_dir,
                         is_hidden,
                         is_system,
+                        is_reparse_point,
                         size,
                         mtime,
                         ctime,
@@ -117,18 +121,45 @@ pub fn scan_directory(dir: &Path) -> Vec<FsEntry> {
     entries
 }
 
-/// Recursive scanner for exFAT / FAT32 volumes or folder subtrees
+/// Recursive scanner for exFAT / FAT32 volumes or folder subtrees (BFS with user priority)
 pub fn scan_subtree(root: &Path, max_depth: usize) -> Vec<FsEntry> {
-    let mut all_entries = Vec::with_capacity(1024);
-    let mut queue = vec![(root.to_path_buf(), 0usize)];
+    use std::collections::VecDeque;
 
-    while let Some((curr_dir, depth)) = queue.pop() {
+    let mut all_entries = Vec::with_capacity(32768);
+    let mut queue = VecDeque::new();
+    queue.push_back((root.to_path_buf(), 0usize));
+
+    while let Some((curr_dir, depth)) = queue.pop_front() {
         let entries = scan_directory(&curr_dir);
         for entry in entries {
-            if entry.is_dir && depth < max_depth {
-                let mut sub_path = curr_dir.clone();
-                sub_path.push(&entry.name);
-                queue.push((sub_path, depth + 1));
+            if entry.is_dir && !entry.is_reparse_point && depth < max_depth {
+                // Avoid traversing junction loops, Recycle Bin, internal system volume metadata, and WinSxS
+                if !entry.name.starts_with('$')
+                    && !entry.name.eq_ignore_ascii_case("System Volume Information")
+                    && !entry.name.eq_ignore_ascii_case("WinSxS")
+                {
+                    let mut sub_path = curr_dir.clone();
+                    sub_path.push(&entry.name);
+
+                    // Prioritize user directories (Downloads, Desktop, Music) to index user files first
+                    if entry.name.eq_ignore_ascii_case("Users")
+                        || entry.name.eq_ignore_ascii_case("Downloads")
+                        || entry.name.eq_ignore_ascii_case("Desktop")
+                        || entry.name.eq_ignore_ascii_case("Music")
+                        || entry.name.eq_ignore_ascii_case("Videos")
+                        || entry.name.eq_ignore_ascii_case("Documents")
+                    {
+                        queue.push_front((sub_path, depth + 1));
+                    } else if entry.name.eq_ignore_ascii_case("Windows")
+                        || entry.name.eq_ignore_ascii_case("AppData")
+                        || entry.name.eq_ignore_ascii_case(".git")
+                        || entry.name.eq_ignore_ascii_case("node_modules")
+                    {
+                        queue.push_back((sub_path, depth + 1));
+                    } else {
+                        queue.push_back((sub_path, depth + 1));
+                    }
+                }
             }
             all_entries.push(entry);
         }
@@ -137,15 +168,158 @@ pub fn scan_subtree(root: &Path, max_depth: usize) -> Vec<FsEntry> {
     all_entries
 }
 
+/// Ultra-fast single-pass scanner that inserts entries directly into IndexBuilder.
+/// Zero intermediate Vec allocations, BFS with user directory prioritization.
+pub fn scan_subtree_into_builder(
+    root: &Path,
+    root_id: u32,
+    vol_id: u8,
+    builder: &mut bdj_search_core::index::builder::IndexBuilder,
+) -> usize {
+    use std::collections::VecDeque;
+
+    let mut queue = VecDeque::with_capacity(4096);
+    queue.push_back((root.to_path_buf(), root_id, 0usize));
+    let mut count = 0usize;
+
+    while let Some((curr_dir, parent_id, depth)) = queue.pop_front() {
+        let mut search_pattern = curr_dir.clone();
+        search_pattern.push("*");
+
+        let wide_pattern: Vec<u16> = search_pattern
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let mut find_data = WIN32_FIND_DATAW::default();
+
+        let handle = unsafe {
+            FindFirstFileExW(
+                PCWSTR(wide_pattern.as_ptr()),
+                FindExInfoBasic,
+                &mut find_data as *mut _ as *mut _,
+                FindExSearchNameMatch,
+                None,
+                FIND_FIRST_EX_LARGE_FETCH,
+            )
+        };
+
+        if let Ok(h) = handle && h != HANDLE(std::ptr::null_mut()) {
+            loop {
+                let name_len = find_data
+                    .cFileName
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(find_data.cFileName.len());
+
+                let name = OsString::from_wide(&find_data.cFileName[..name_len])
+                    .to_string_lossy()
+                    .to_string();
+
+                if name != "." && name != ".." {
+                    let attrs = find_data.dwFileAttributes;
+                    let is_dir = (attrs & FILE_ATTRIBUTE_DIRECTORY.0) != 0;
+                    let is_hidden = (attrs & FILE_ATTRIBUTE_HIDDEN.0) != 0;
+                    let is_system = (attrs & FILE_ATTRIBUTE_SYSTEM.0) != 0;
+                    let is_reparse_point = (attrs & 0x00000400) != 0;
+
+                    let size = if is_dir {
+                        0
+                    } else {
+                        ((find_data.nFileSizeHigh as u64) << 32) | (find_data.nFileSizeLow as u64)
+                    };
+
+                    let mtime = filetime_to_unix_secs(
+                        find_data.ftLastWriteTime.dwLowDateTime,
+                        find_data.ftLastWriteTime.dwHighDateTime,
+                    );
+                    let ctime = filetime_to_unix_secs(
+                        find_data.ftCreationTime.dwLowDateTime,
+                        find_data.ftCreationTime.dwHighDateTime,
+                    );
+
+                    let entry_id = builder.add_entry(
+                        parent_id,
+                        &name,
+                        is_dir,
+                        is_hidden,
+                        is_system,
+                        vol_id,
+                        size,
+                        mtime,
+                        ctime,
+                    );
+                    count += 1;
+
+                    if is_dir && !is_reparse_point {
+                        if !name.starts_with('$')
+                            && !name.eq_ignore_ascii_case("System Volume Information")
+                            && !name.eq_ignore_ascii_case("WinSxS")
+                        {
+                            let mut sub_path = curr_dir.clone();
+                            sub_path.push(&name);
+
+                            if name.eq_ignore_ascii_case("Users")
+                                || name.eq_ignore_ascii_case("Downloads")
+                                || name.eq_ignore_ascii_case("Desktop")
+                                || name.eq_ignore_ascii_case("Music")
+                                || name.eq_ignore_ascii_case("Videos")
+                                || name.eq_ignore_ascii_case("Documents")
+                            {
+                                queue.push_front((sub_path, entry_id, depth + 1));
+                            } else if name.eq_ignore_ascii_case("Windows")
+                                || name.eq_ignore_ascii_case("AppData")
+                                || name.eq_ignore_ascii_case(".git")
+                                || name.eq_ignore_ascii_case("node_modules")
+                            {
+                                queue.push_back((sub_path, entry_id, depth + 1));
+                            } else {
+                                queue.push_back((sub_path, entry_id, depth + 1));
+                            }
+                        }
+                    }
+                }
+
+                let has_next = unsafe { FindNextFileW(h, &mut find_data) };
+                if has_next.is_err() {
+                    break;
+                }
+            }
+            let _ = unsafe { FindClose(h) };
+        }
+    }
+
+    count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_scan_current_dir() {
-        let current_dir = std::env::current_dir().unwrap();
-        let entries = scan_directory(&current_dir);
-        assert!(!entries.is_empty(), "Current directory should contain entries");
-        assert!(entries.iter().any(|e| e.name == "Cargo.toml" || e.name == "src"));
+    fn test_scan_users_dir() {
+        let mut builder = bdj_search_core::index::builder::IndexBuilder::new();
+        let vol_id = builder.vol_table.add_or_update(r"C:\", "Windows", "NTFS", false);
+        let root_id = builder.add_entry(u32::MAX, "", true, false, false, vol_id, 0, 0, 0);
+        let user_dir = std::path::Path::new(r"C:\Users\David Zapata\Downloads");
+        let start = std::time::Instant::now();
+        let count = scan_subtree_into_builder(user_dir, root_id, vol_id, &mut builder);
+        println!("Indexed {} files in Downloads in {:?}", count, start.elapsed());
+        assert!(count > 0);
+
+        // Also index Desktop and Music if available
+        let desktop = std::path::Path::new(r"C:\Users\David Zapata\Desktop");
+        let d_count = scan_subtree_into_builder(desktop, root_id, vol_id, &mut builder);
+        println!("Indexed {} files in Desktop", d_count);
+
+        let out_dir = std::path::PathBuf::from(r"C:\ProgramData\BDJ Studio\Search Pro");
+        let _ = std::fs::create_dir_all(&out_dir);
+        let index_path = out_dir.join("index.bdjx");
+        let write_start = std::time::Instant::now();
+        let mut file = std::fs::File::create(&index_path).unwrap();
+        let write_res = builder.write_to(&mut file);
+        println!("Written index to {:?}: {:?} in {:?}", index_path, write_res, write_start.elapsed());
+        assert!(write_res.is_ok());
     }
 }

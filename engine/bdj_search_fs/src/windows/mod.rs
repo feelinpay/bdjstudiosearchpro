@@ -6,4 +6,4 @@ pub mod walk;
 pub use rdcw::{DirectoryChangeRecord, DirectoryWatcher};
 pub use usn::{UsnJournalCursor, UsnRecord, UsnScanner};
 pub use volumes::{list_volumes, VolumeInfo};
-pub use walk::{scan_directory, scan_subtree, FsEntry};
+pub use walk::{scan_directory, scan_subtree, scan_subtree_into_builder, FsEntry};

@@ -5,6 +5,28 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_UNIX_SOCKET_PATH: &str = "/var/run/bdj_search_pro.sock";
 
+/// Ruta del socket de control resuelta en tiempo de ejecución.
+///
+/// En macOS el agente de usuario no puede escribir en `/var/run`; el socket
+/// vive en la carpeta de soporte de la aplicación, junto a los datos del
+/// índice (la misma decisión que ya tomó Sample Pad para el almacenamiento).
+/// `/var/run` queda como respaldo para procesos que corran como root.
+pub fn default_unix_socket_path() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let dir = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("BDJ Studio")
+                .join("Search Pro");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("bdj_search_pro.sock");
+        }
+    }
+    PathBuf::from(DEFAULT_UNIX_SOCKET_PATH)
+}
+
 pub struct UnixSocketServer {
     listener: UnixListener,
     path: PathBuf,
