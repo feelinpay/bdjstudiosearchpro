@@ -28,5 +28,15 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>BDJ Studio Search Pro necesita acceso al Escritorio para indexar y encontrar rápidamente pistas de audio y archivos.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>BDJ Studio Search Pro necesita acceso a Documentos para indexar bibliotecas y proyectos de producción musical.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>BDJ Studio Search Pro necesita acceso a Descargas para indexar pistas descargadas.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>BDJ Studio Search Pro necesita acceso a discos externos y memorias USB para buscar en bibliotecas de DJ.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>BDJ Studio Search Pro necesita acceso a unidades de red para buscar en almacenes compartidos.</string>
 </dict>
 </plist>

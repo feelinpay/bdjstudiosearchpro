@@ -2,7 +2,7 @@ name: Windows Build & CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'cierre/**', 'feat/**', 'fix/**' ]
   pull_request:
     branches: [ main, master ]
 

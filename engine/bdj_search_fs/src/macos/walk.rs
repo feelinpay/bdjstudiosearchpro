@@ -34,7 +34,6 @@ pub fn scan_directory(dir: &Path) -> Vec<MacFsEntry> {
 
     if let Ok(read_dir) = fs::read_dir(dir) {
         for entry in read_dir.flatten() {
-            let path = entry.path();
             let name = match entry.file_name().into_string() {
                 Ok(n) => n,
                 Err(os_str) => os_str.to_string_lossy().to_string(),
