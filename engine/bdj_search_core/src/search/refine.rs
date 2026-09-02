@@ -11,7 +11,11 @@ use crate::query::eval::QueryEvaluator;
 ///
 /// Por encima del tope no se guarda nada: repetir el recorrido de una consulta
 /// tan ancha es más barato que arrastrar su resultado.
-pub const MAX_CACHED_PER_ENTRY: usize = 400_000;
+pub fn max_cached_per_entry() -> usize {
+    crate::tuning::Tuning::current().max_cached_refine
+}
+
+pub const MAX_CACHED_PER_ENTRY: usize = 2_000_000;
 
 #[derive(Clone, Debug)]
 pub struct RefinementEntry {

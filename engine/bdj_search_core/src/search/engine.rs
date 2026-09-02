@@ -1,5 +1,5 @@
 use super::cancel::CancellationToken;
-use super::refine::{MAX_CACHED_PER_ENTRY, RefinementStack};
+use super::refine::RefinementStack;
 use super::scan::scan_names_bulk;
 use crate::index::view::IndexView;
 use crate::query::compiled::MatchScratch;
@@ -392,7 +392,8 @@ impl Engine {
 
         // El conjunto completo, sin ordenar, alimenta el refinamiento de la
         // siguiente pulsación. Solo se copia si cabe dentro del presupuesto.
-        if total <= MAX_CACHED_PER_ENTRY {
+        let max_refine = crate::tuning::Tuning::current().max_cached_refine;
+        if total <= max_refine {
             let mut all = Vec::with_capacity(total);
             for c in &chunks {
                 all.extend_from_slice(&c.ids);
@@ -421,7 +422,8 @@ impl Engine {
 
     /// Guarda un resultado completo para poder refinar la siguiente pulsación.
     fn remember(&self, query: &str, ast: &crate::query::QueryAst, ids: &[u32]) {
-        if ids.len() > MAX_CACHED_PER_ENTRY {
+        let max_refine = crate::tuning::Tuning::current().max_cached_refine;
+        if ids.len() > max_refine {
             return;
         }
         let mut stack = self.refine_stack.lock().unwrap();
@@ -555,9 +557,11 @@ impl Engine {
         token: &CancellationToken,
         gen_id: u64,
     ) -> Vec<ChunkHits> {
+        let threads = pool().map(|p| p.current_num_threads()).unwrap_or(1);
+        let c_chunk = (candidates.len() / (threads * 2)).clamp(1024, chunk_size());
         en_el_grupo(|| {
         candidates
-            .par_chunks(chunk_size())
+            .par_chunks(c_chunk)
             .map(|slice| {
                 if token.is_cancelled(gen_id) {
                     return ChunkHits {

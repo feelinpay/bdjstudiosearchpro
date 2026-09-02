@@ -86,12 +86,10 @@ pub struct Tuning {
     pub quiet_period_ms: u64,
 
     /// Cuántas entradas se construyen en memoria antes de volcar a disco.
-    ///
-    /// El límite existe porque el constructor mantiene unos 65 bytes por
-    /// entrada: diez millones de archivos son unos 650 MB de pico, y en un
-    /// equipo de 4 GB eso empuja al sistema a paginar durante el primer
-    /// escaneo.
     pub build_batch: usize,
+
+    /// Cuántas filas coincidentes se pueden guardar en la pila de refinamiento.
+    pub max_cached_refine: usize,
 }
 
 impl Tuning {
@@ -101,9 +99,9 @@ impl Tuning {
     /// las tres gamas sin necesidad de tres máquinas.
     pub fn derive(cores: usize, memory_mb: u64) -> Self {
         let cores = cores.max(1);
-        let tier = if cores <= 2 || memory_mb < 8 * 1024 {
+        let tier = if cores <= 2 || memory_mb < 7 * 1024 {
             Tier::Low
-        } else if cores >= 8 && memory_mb >= 16 * 1024 {
+        } else if cores >= 8 && memory_mb >= 14 * 1024 {
             Tier::High
         } else {
             Tier::Mid
@@ -151,6 +149,20 @@ impl Tuning {
                 Tier::High => 400,
             },
             build_batch,
+            max_cached_refine: match tier {
+                Tier::Low => 500_000,
+                Tier::Mid => 1_500_000,
+                Tier::High => 3_000_000,
+            },
+        }
+    }
+
+    /// Deriva los ajustes de un perfil concreto, ignorando el hardware real.
+    pub fn derive_for_tier(tier: Tier) -> Self {
+        match tier {
+            Tier::Low => Self::derive(2, 4 * 1024),
+            Tier::Mid => Self::derive(4, 8 * 1024),
+            Tier::High => Self::derive(8, 16 * 1024),
         }
     }
 
@@ -158,6 +170,14 @@ impl Tuning {
     pub fn current() -> &'static Tuning {
         static ACTUAL: OnceLock<Tuning> = OnceLock::new();
         ACTUAL.get_or_init(|| {
+            if let Ok(val) = std::env::var("BDJ_TIER") {
+                match val.to_lowercase().as_str() {
+                    "low" | "baja" => return Self::derive_for_tier(Tier::Low),
+                    "mid" | "media" => return Self::derive_for_tier(Tier::Mid),
+                    "high" | "alta" => return Self::derive_for_tier(Tier::High),
+                    _ => {}
+                }
+            }
             let cores = std::thread::available_parallelism()
                 .map(|n| n.get())
                 .unwrap_or(2);

@@ -112,9 +112,10 @@ fn presupuesto_de_latencia_sobre_diez_millones() {
         fria.entry_ids.len()
     );
 
-    // Secuencia de tecleo.
+    println!("Tuning: {:?}", bdj_search_core::tuning::Tuning::current());
+    // Secuencia de tecleo progresiva: desde el prefijo amplio hasta artista + canción.
     let mut ultima = t_fria;
-    for q in ["mi", "mic", "mich", "micha", "michae", "michael"] {
+    for q in ["mi", "mic", "mich", "micha", "michae", "michael", "michael b", "michael billie"] {
         let t = Instant::now();
         let (_g, res) = engine.search(&view, q, 0, true);
         let dt = t.elapsed();
