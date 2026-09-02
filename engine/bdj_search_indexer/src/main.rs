@@ -28,6 +28,34 @@ const FILE_ATTRIBUTE_SYSTEM: u32 = 0x04;
 static GLOBAL_RUNNING: AtomicBool = AtomicBool::new(true);
 
 #[cfg(windows)]
+fn is_on_battery() -> bool {
+    #[repr(C)]
+    struct SystemPowerStatus {
+        ac_line_status: u8,
+        battery_flag: u8,
+        battery_life_percent: u8,
+        system_status_flag: u8,
+        battery_life_time: u32,
+        battery_full_life_time: u32,
+    }
+    unsafe extern "system" {
+        fn GetSystemPowerStatus(status: *mut SystemPowerStatus) -> i32;
+    }
+    let mut status = std::mem::MaybeUninit::<SystemPowerStatus>::uninit();
+    if unsafe { GetSystemPowerStatus(status.as_mut_ptr()) } != 0 {
+        let s = unsafe { status.assume_init() };
+        s.ac_line_status == 0
+    } else {
+        false
+    }
+}
+
+#[cfg(not(windows))]
+fn is_on_battery() -> bool {
+    false
+}
+
+#[cfg(windows)]
 use windows_service::{
     define_windows_service,
     service::{
@@ -1298,7 +1326,8 @@ impl IndexerService {
         // cada cambio: copiar una carpeta de 500 pistas debe producir una sola
         // reescritura y no quinientas. Tambien se publica si la capa crece
         // demasiado, para que una copia larga no deje la busqueda desfasada.
-        const POLL_INTERVAL: Duration = Duration::from_millis(500);
+        const FAST_POLL: Duration = Duration::from_millis(500);
+        let mut idle_cycles: u32 = 0;
 
         let base_count = {
             let overlay = self.overlay.lock().unwrap();
@@ -1323,8 +1352,7 @@ impl IndexerService {
         let mut last_change: Option<Instant> = None;
 
         tracing::info!(
-            "Servicio activo. Sondeo cada {:?}, publicacion tras {:?} de calma.",
-            POLL_INTERVAL,
+            "Servicio activo. Sondeo base 500ms (reposo hasta 2-3.5s), publicacion tras {:?} de calma.",
             quiet_period
         );
 
@@ -1332,7 +1360,18 @@ impl IndexerService {
         let mut usb_poll_counter = 0u8;
 
         while running.load(Ordering::SeqCst) && GLOBAL_RUNNING.load(Ordering::SeqCst) {
-            thread::sleep(POLL_INTERVAL);
+            let max_idle = if is_on_battery() {
+                Duration::from_millis(3_500)
+            } else {
+                Duration::from_millis(2_000)
+            };
+            let current_poll = if idle_cycles < 10 {
+                FAST_POLL
+            } else {
+                let extra = ((idle_cycles - 10) as u64 * 250).min(max_idle.as_millis() as u64 - 500);
+                Duration::from_millis(500 + extra)
+            };
+            thread::sleep(current_poll);
 
             // Sin licencia activa —o con el indexado detenido por el usuario—
             // el servicio no sigue ningun cambio ni republica nada.
@@ -1374,6 +1413,7 @@ impl IndexerService {
             let found = 0usize;
 
             if found > 0 {
+                idle_cycles = 0;
                 tracing::debug!("{} cambios aplicados a la capa", found);
                 last_change = Some(Instant::now());
                 // Se publica **ya**, sin esperar a la compactación.
@@ -1387,6 +1427,8 @@ impl IndexerService {
                 // milisegundos, y la compactación queda para lo que debía ser:
                 // mantenimiento en segundo plano que nadie espera.
                 self.publish_overlay(self.base_generation());
+            } else {
+                idle_cycles = idle_cycles.saturating_add(1);
             }
 
             let (has_changes, too_big) = {
