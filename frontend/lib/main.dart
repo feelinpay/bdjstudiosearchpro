@@ -977,13 +977,33 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
             ),
             Expanded(
               child: DropTarget(
-                onDragDone: (detail) {
+                onDragDone: (detail) async {
                   if (detail.files.isEmpty) return;
-                  final path = detail.files.first.path;
-                  // Soltar una carpeta la abre; soltar un archivo muestra su
-                  // carpeta contenedora. Antes ambos casos escribían una
-                  // consulta `ruta:` en el buscador, que es más lento y menos
-                  // útil que entrar directamente.
+                  final carpetaDestino = ref.read(searchProvider).browsePath;
+                  final rutas = detail.files.map((f) => f.path).where((p) => p.isNotEmpty).toList();
+                  if (rutas.isEmpty) return;
+
+                  // Si hay una carpeta abierta en esta ventana, transferir (mover) hacia ella:
+                  if (carpetaDestino.isNotEmpty && Directory(carpetaDestino).existsSync()) {
+                    final sep = Platform.pathSeparator;
+                    final aTransferir = rutas.where((r) =>
+                        r != carpetaDestino &&
+                        !carpetaDestino.startsWith('$r$sep') &&
+                        !carpetaDestino.startsWith('$r/') &&
+                        !carpetaDestino.startsWith('$r\\')
+                    ).toList();
+                    if (aTransferir.isNotEmpty) {
+                      await ref.read(fileOpsProvider.notifier).moveTo(aTransferir, carpetaDestino);
+                      final nombreCarpeta = carpetaDestino.split(RegExp(r'[\\/]')).lastWhere((s) => s.isNotEmpty, orElse: () => carpetaDestino);
+                      _aviso(aTransferir.length == 1
+                          ? 'Elemento transferido a $nombreCarpeta'
+                          : '${aTransferir.length} elementos transferidos a $nombreCarpeta');
+                      return;
+                    }
+                  }
+
+                  // Si no hay carpeta abierta (ej. raíz de equipo), abrir el elemento soltado:
+                  final path = rutas.first;
                   ref.read(searchProvider.notifier).openFolder(path);
                 },
                 onDragEntered: (_) => setState(() => _isDragging = true),
@@ -1018,15 +1038,17 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
                               border: Border.all(
                                   color: AppColors.primary, width: 2),
                             ),
-                            child: const Row(
+                            child: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                Icon(Icons.folder_open_rounded,
+                                const Icon(Icons.drive_file_move_rounded,
                                     color: AppColors.primary, size: 24),
-                                SizedBox(width: 12),
+                                const SizedBox(width: 12),
                                 Text(
-                                  'Soltar carpeta para buscar dentro de ella',
-                                  style: TextStyle(
+                                  ref.read(searchProvider).browsePath.isNotEmpty
+                                      ? 'Soltar para transferir a ${ref.read(searchProvider).browsePath.split(RegExp(r"[\\/]")).lastWhere((s) => s.isNotEmpty, orElse: () => "esta carpeta")}'
+                                      : 'Soltar para abrir',
+                                  style: const TextStyle(
                                     fontSize: 14,
                                     fontWeight: FontWeight.w600,
                                     color: AppColors.textPrimary,
