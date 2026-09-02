@@ -769,7 +769,7 @@ impl IndexerService {
     /// recorriendo directorios en segundo plano.
     pub fn initial_scan(&self) -> (u64, usize) {
         tracing::info!("Iniciando escaneo inicial de volumenes...");
-        let mut builder = IndexBuilder::new();
+        let mut builder = IndexBuilder::with_tuning();
 
         #[cfg(windows)]
         let mut phase2_vols: Vec<u8> = Vec::new();
@@ -1045,6 +1045,7 @@ impl IndexerService {
             }
 
             watcher.next_usn = new_usn;
+            overlay.builder.vol_table.update_cursor(&watcher.mount_prefix, new_usn as u64);
         }
 
         (applied, needs_rescan)
@@ -1555,6 +1556,7 @@ fn scan_windows_volume(
                             journal_id: cursor.journal_id,
                             next_usn: cursor.next_usn,
                         });
+                        builder.vol_table.update_cursor(&vol.path, cursor.next_usn as u64);
                         scanned_mft = true;
                     }
                     Err(e) => {

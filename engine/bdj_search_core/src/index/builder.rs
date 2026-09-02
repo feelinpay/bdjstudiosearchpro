@@ -60,6 +60,13 @@ impl IndexBuilder {
         }
     }
 
+    /// Reserva la capacidad óptima según el perfil de memoria de la máquina (`build_batch`).
+    /// En gama baja (4 GB) reserva ~1.9 M de entradas, evitando picos de RSS.
+    pub fn with_tuning() -> Self {
+        let batch = crate::tuning::Tuning::current().build_batch;
+        Self::with_capacity(batch)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn add_entry(
         &mut self,
