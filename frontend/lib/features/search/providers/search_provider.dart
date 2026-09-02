@@ -11,6 +11,7 @@ import '../models/file_row.dart';
 import '../models/row_cache.dart';
 import '../models/selection.dart';
 import '../models/view_mode.dart';
+import 'recent_folders_provider.dart';
 
 /// Qué está mostrando la tabla.
 enum ViewMode {
@@ -170,7 +171,9 @@ class SearchState {
 }
 
 class SearchNotifier extends StateNotifier<SearchState> {
-  SearchNotifier({bool autoInit = true}) : super(const SearchState()) {
+  final Ref? ref;
+
+  SearchNotifier({this.ref, bool autoInit = true}) : super(const SearchState()) {
     if (autoInit) {
       _init();
     }
@@ -449,6 +452,9 @@ class SearchNotifier extends StateNotifier<SearchState> {
         // delante se descarta: es como se comporta cualquier navegador.
         historial = [...historial.take(indice + 1), path];
         indice = historial.length - 1;
+        if (path.isNotEmpty) {
+          ref?.read(recentFoldersProvider.notifier).add(path);
+        }
       }
 
       _cache.clear();
@@ -892,5 +898,5 @@ class SearchNotifier extends StateNotifier<SearchState> {
 }
 
 final searchProvider = StateNotifierProvider<SearchNotifier, SearchState>((ref) {
-  return SearchNotifier();
+  return SearchNotifier(ref: ref);
 });

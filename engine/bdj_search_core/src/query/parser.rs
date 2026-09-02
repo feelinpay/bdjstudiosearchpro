@@ -130,8 +130,21 @@ impl Parser {
                 QueryAst::Ext(exts)
             }
             "size" | "tam" => Self::parse_size_query(value),
-            "dm" | "mod" => Self::parse_date_query(value, true),
+            "dm" | "mod" | "fecha" => Self::parse_date_query(value, true),
             "dc" | "creado" => Self::parse_date_query(value, false),
+            "desde" | "from" => {
+                let ts = Self::parse_date_secs(value);
+                QueryAst::DateModified { min: ts, max: None }
+            }
+            "hasta" | "to" => {
+                let ts = Self::parse_date_secs(value).map(|t| t + 86400);
+                QueryAst::DateModified { min: None, max: ts }
+            }
+            "oculto" | "hidden" => match value.to_ascii_lowercase().as_str() {
+                "si" | "yes" | "1" | "true" => QueryAst::HiddenOnly,
+                "no" | "0" | "false" => QueryAst::VisibleOnly,
+                _ => QueryAst::Term(format!("{}:{}", name, value)),
+            },
             "path" | "ruta" => QueryAst::Path(value.to_string()),
             "parent" | "carpeta" => QueryAst::Parent(value.to_string()),
             "pid" => {
@@ -321,5 +334,20 @@ mod tests {
 
         let ast_range = Parser::parse("tam:10mb..50mb");
         assert_eq!(ast_range, QueryAst::Size { min: Some(10 * 1024 * 1024), max: Some(50 * 1024 * 1024) });
+    }
+
+    #[test]
+    fn test_date_exact_and_hidden_parsing() {
+        let ast_desde = Parser::parse("desde:2026-01-01");
+        assert!(matches!(ast_desde, QueryAst::DateModified { min: Some(_), max: None }));
+
+        let ast_hasta = Parser::parse("hasta:2026-03-31");
+        assert!(matches!(ast_hasta, QueryAst::DateModified { min: None, max: Some(_) }));
+
+        let ast_oculto_si = Parser::parse("oculto:si");
+        assert_eq!(ast_oculto_si, QueryAst::HiddenOnly);
+
+        let ast_oculto_no = Parser::parse("oculto:no");
+        assert_eq!(ast_oculto_no, QueryAst::VisibleOnly);
     }
 }

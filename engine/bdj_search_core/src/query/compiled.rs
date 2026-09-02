@@ -58,6 +58,8 @@ pub enum CompiledQuery {
     Case(String),
     FileOnly,
     FolderOnly,
+    HiddenOnly,
+    VisibleOnly,
     And(Vec<CompiledQuery>),
     Or(Vec<CompiledQuery>),
     Not(Box<CompiledQuery>),
@@ -163,6 +165,8 @@ impl CompiledQuery {
             QueryAst::Case(c) => CompiledQuery::Case(c.clone()),
             QueryAst::FileOnly => CompiledQuery::FileOnly,
             QueryAst::FolderOnly => CompiledQuery::FolderOnly,
+            QueryAst::HiddenOnly => CompiledQuery::HiddenOnly,
+            QueryAst::VisibleOnly => CompiledQuery::VisibleOnly,
             QueryAst::And(items) => {
                 CompiledQuery::And(items.iter().map(|a| Self::compile(a, view)).collect())
             }
@@ -247,6 +251,8 @@ impl CompiledQuery {
             },
             CompiledQuery::FileOnly => !view.is_dir(idx),
             CompiledQuery::FolderOnly => view.is_dir(idx),
+            CompiledQuery::HiddenOnly => view.is_hidden(idx),
+            CompiledQuery::VisibleOnly => !view.is_hidden(idx),
             CompiledQuery::And(items) => items.iter().all(|i| i.matches(view, idx, scratch)),
             CompiledQuery::Or(items) => items.iter().any(|i| i.matches(view, idx, scratch)),
             CompiledQuery::Not(inner) => !inner.matches(view, idx, scratch),
@@ -290,7 +296,10 @@ impl CompiledQuery {
     fn cost(&self) -> u8 {
         match self {
             CompiledQuery::Always | CompiledQuery::Never => 0,
-            CompiledQuery::FileOnly | CompiledQuery::FolderOnly => 1,
+            CompiledQuery::FileOnly
+            | CompiledQuery::FolderOnly
+            | CompiledQuery::HiddenOnly
+            | CompiledQuery::VisibleOnly => 1,
             CompiledQuery::ExtSet(_) => 1,
             CompiledQuery::Size { .. }
             | CompiledQuery::DateModified { .. }

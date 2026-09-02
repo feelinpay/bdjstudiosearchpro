@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/ffi/api.dart' as ffi;
 import '../../fileops/providers/file_ops_provider.dart';
 import '../providers/favorites_provider.dart';
+import '../providers/recent_folders_provider.dart';
 import '../providers/search_provider.dart';
 
 /// Panel lateral de navegación con Marcadores (favoritos) y equipo/volúmenes.
@@ -197,6 +198,7 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
     final notifier = ref.read(searchProvider.notifier);
     final favorites = ref.watch(favoritesProvider);
     final favoritesNotifier = ref.read(favoritesProvider.notifier);
+    final recentFolders = ref.watch(recentFoldersProvider);
     final serviceStatus = _serviceStatus;
 
     return Container(
@@ -269,6 +271,62 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
               path,
             );
           }),
+
+          if (recentFolders.isNotEmpty) ...[
+            const Divider(height: 16, color: AppColors.border),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'CARPETAS RECIENTES',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.clear_all,
+                        size: 16, color: AppColors.textSecondary),
+                    onPressed: () =>
+                        ref.read(recentFoldersProvider.notifier).clear(),
+                    tooltip: 'Limpiar recientes',
+                  ),
+                ],
+              ),
+            ),
+            ...recentFolders.take(5).map((path) {
+              final isSelected = searchState.browsePath == path;
+              final name = path
+                  .split(RegExp(r'[\\/]'))
+                  .lastWhere((s) => s.isNotEmpty, orElse: () => path);
+              return _aceptaSuelta(
+                ListTile(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  leading: const Icon(Icons.history_rounded,
+                      size: 16, color: AppColors.textSecondary),
+                  title: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight:
+                          isSelected ? FontWeight.bold : FontWeight.normal,
+                      color: isSelected
+                          ? AppColors.primary
+                          : AppColors.textPrimary,
+                    ),
+                  ),
+                  onTap: () => notifier.openFolder(path),
+                ),
+                path,
+              );
+            }),
+          ],
 
           const Divider(height: 16, color: AppColors.border),
 

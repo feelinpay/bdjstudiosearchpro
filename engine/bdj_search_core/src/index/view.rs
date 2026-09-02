@@ -192,6 +192,15 @@ impl<'a> IndexView<'a> {
     }
 
     #[inline(always)]
+    pub fn is_hidden(&self, idx: usize) -> bool {
+        if idx >= self.entry_count() {
+            return false;
+        }
+        (self.flags[idx] & crate::index::layout::FLAG_HIDDEN) != 0
+            || self.get_name_bytes(idx).first() == Some(&b'.')
+    }
+
+    #[inline(always)]
     pub fn get_name(&self, idx: usize) -> Option<&str> {
         if idx >= self.entry_count() {
             return None;

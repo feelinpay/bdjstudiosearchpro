@@ -14,6 +14,8 @@ pub enum QueryAst {
     Case(String),
     FileOnly,
     FolderOnly,
+    HiddenOnly,
+    VisibleOnly,
     And(Vec<QueryAst>),
     Or(Vec<QueryAst>),
     Not(Box<QueryAst>),

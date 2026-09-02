@@ -104,6 +104,8 @@ impl QueryEvaluator {
             }
             QueryAst::FileOnly => !view.is_dir(idx),
             QueryAst::FolderOnly => view.is_dir(idx),
+            QueryAst::HiddenOnly => view.is_hidden(idx),
+            QueryAst::VisibleOnly => !view.is_hidden(idx),
             QueryAst::And(terms) => terms.iter().all(|t| Self::matches(t, view, idx)),
             QueryAst::Or(terms) => terms.iter().any(|t| Self::matches(t, view, idx)),
             QueryAst::Not(inner) => !Self::matches(inner, view, idx),
@@ -184,6 +186,10 @@ impl QueryEvaluator {
                 QueryAst::DateCreated { min: nmin, max: nmax },
                 QueryAst::DateCreated { min: omin, max: omax },
             ) => Self::range_narrows_u32(*nmin, *nmax, *omin, *omax),
+            (QueryAst::FileOnly, QueryAst::FileOnly) => true,
+            (QueryAst::FolderOnly, QueryAst::FolderOnly) => true,
+            (QueryAst::HiddenOnly, QueryAst::HiddenOnly) => true,
+            (QueryAst::VisibleOnly, QueryAst::VisibleOnly) => true,
             _ => false,
         }
     }
