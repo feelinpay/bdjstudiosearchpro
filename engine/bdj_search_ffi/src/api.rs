@@ -1243,6 +1243,10 @@ fn flush_changes() {
     service::send_ok(&IpcCommand::LocalChanges {
         changes: traducidos,
     });
+    // Recarga la capa de inmediato: el servicio ya la publicó en disco antes de
+    // responder con Ack, así que este proceso ya puede ver el archivo nuevo en el
+    // mismo fotograma.
+    reload_if_changed();
 }
 
 /// Ajustes que la interfaz debe usar en esta máquina.

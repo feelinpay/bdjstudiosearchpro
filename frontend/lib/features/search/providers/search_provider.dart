@@ -859,23 +859,24 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   /// Vuelve a consultar tras una operación de archivo.
   Future<void> refreshAfterFileOperation() async {
-    // El indexador publica los cambios en su propio ritmo (0,5–2 s de calma
-    // antes de reescribir el índice). Preguntar una sola vez devolvería false y
-    // repetiríamos la vista contra un índice viejo: el archivo duplicado o el
-    // renombrado no aparecería hasta el sondeo pasivo de 1 s (o nunca, si el
-    // indexador va lento). Se reintenta brevemente hasta que la generación
-    // sube, y solo entonces se repite la consulta.
-    const total = Duration(milliseconds: 4000);
-    const paso = Duration(milliseconds: 300);
-    final limite = DateTime.now().add(total);
+    // La capa optimista ya publicó y recargó el overlay.bdjo al terminar fsops.
+    // Comprobamos si cambió para refrescar de inmediato sin demoras perceptibles.
     var cambiado = false;
-    do {
-      try {
-        cambiado = await ffi.reloadIfChanged();
-      } catch (_) {}
-      if (cambiado) break;
-      await Future<void>.delayed(paso);
-    } while (DateTime.now().isBefore(limite));
+    try {
+      cambiado = await ffi.reloadIfChanged();
+    } catch (_) {}
+
+    if (!cambiado) {
+      // Breve margen de cortesía por si el servicio tardó unos milisegundos en publicar.
+      for (var i = 0; i < 3; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+        try {
+          if (await ffi.reloadIfChanged()) {
+            break;
+          }
+        } catch (_) {}
+      }
+    }
     await _repeatCurrentView();
   }
 
