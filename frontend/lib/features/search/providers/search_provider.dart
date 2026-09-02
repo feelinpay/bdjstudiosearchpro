@@ -317,8 +317,9 @@ class SearchNotifier extends StateNotifier<SearchState> {
           await _repeatCurrentView();
         }
       } catch (_) {
-        // Un fallo puntual al remapear no debe tumbar la interfaz; se reintenta
-        // cuando la espera se agote.
+        // Un fallo puntual al remapear o reiniciar el servicio no debe tumbar la
+        // interfaz ni girar en vacío; espera medio segundo antes de reintentar.
+        await Future<void>.delayed(const Duration(milliseconds: 500));
       }
     }
   }
