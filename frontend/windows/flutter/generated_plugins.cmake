@@ -4,11 +4,13 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_drop
+  file_selector_windows
   flutter_secure_storage_windows
   hotkey_manager_windows
+  irondash_engine_context
   screen_retriever
+  super_native_extensions
   tray_manager
-  url_launcher_windows
   window_manager
 )
 

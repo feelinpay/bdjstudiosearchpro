@@ -7,23 +7,43 @@ import 'frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `resolve_default_index_path`
+// These functions are ignored because they are not marked as `pub`: `flush_changes`, `kind_code`, `overlay_generation_on_disk`, `policy_from`, `reload_overlay`, `resolve_default_index_path`, `state_code`, `to_ffi`, `to_paths`, `tracing_no_op`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `LastQuery`
 
 Future<String> ping() => RustLib.instance.api.crateApiPing();
 
 Future<void> engineOpen({required String indexPathStr}) =>
     RustLib.instance.api.crateApiEngineOpen(indexPathStr: indexPathStr);
 
-/// Vuelve a mapear el indice si el servicio ha publicado una version nueva.
+/// Estado del motor, con la causa concreta cuando algo falla.
 ///
-/// Devuelve `true` cuando algo cambio, para que la interfaz repita la consulta
-/// en curso. Sin esto el cliente mapeaba el indice una sola vez al arrancar y
-/// no volvia a enterarse de nada: por muy al dia que estuviera el servicio, la
-/// aplicacion seguia mostrando la foto del arranque.
+/// Antes la interfaz solo sabía si el índice estaba abierto o no, y pintaba
+/// «Cargando motor…» para cualquier fallo. Con esto puede decir si falta el
+/// servicio, si el índice es de un formato anterior o si es un problema de
+/// permisos.
+Future<EngineStatusFfi> engineStatus() =>
+    RustLib.instance.api.crateApiEngineStatus();
+
+/// Vuelve a mapear el índice si el servicio ha publicado una versión nueva.
+///
+/// Devuelve `true` cuando algo cambió, para que la interfaz repita la consulta
+/// en curso. Sin esto el cliente mapeaba el índice una sola vez al arrancar y no
+/// volvía a enterarse de nada.
 Future<bool> reloadIfChanged() =>
     RustLib.instance.api.crateApiReloadIfChanged();
 
-/// Generacion del indice actualmente mapeado, para diagnostico.
+/// Espera a que el índice publique una generación nueva.
+///
+/// Es la mitad "de empuje" de un socket: la interfaz no sondea con un
+/// temporizador, sino que se queda esperando esta llamada; en cuanto el servicio
+/// reescribe el índice (rename atómico), devuelve `true` en decenas de
+/// milisegundos. Corre en el hilo de trabajo nativo, nunca en el de la UI.
+///
+/// Devuelve `false` si el plazo se agota sin publicaciones, para que la interfaz
+/// pueda reintentar sin esperar para siempre.
+Future<bool> waitIndexChanged({required BigInt timeoutMs}) =>
+    RustLib.instance.api.crateApiWaitIndexChanged(timeoutMs: timeoutMs);
+
 Future<BigInt> indexGeneration() =>
     RustLib.instance.api.crateApiIndexGeneration();
 
@@ -37,6 +57,36 @@ Future<BigInt> search({
   query: query,
   sortCol: sortCol,
   ascending: ascending,
+);
+
+/// Busca devolviendo, como mucho, `limit` filas ya ordenadas.
+///
+/// El conteo total que devuelve `search_status` es exacto aunque la ventana esté
+/// recortada: contar es parte del recorrido, ordenar el conjunto entero no.
+Future<BigInt> searchWithLimit({
+  required String query,
+  required String scope,
+  required int sortCol,
+  required bool ascending,
+  required int limit,
+}) => RustLib.instance.api.crateApiSearchWithLimit(
+  query: query,
+  scope: scope,
+  sortCol: sortCol,
+  ascending: ascending,
+  limit: limit,
+);
+
+/// Amplía la ventana de la última consulta sin cambiarla.
+///
+/// La interfaz la usa cuando el usuario baja más allá de las filas que ya tiene.
+/// Devuelve la nueva generación, o la misma si no hacía falta ampliar.
+Future<BigInt> extendResults({
+  required BigInt generation,
+  required int limit,
+}) => RustLib.instance.api.crateApiExtendResults(
+  generation: generation,
+  limit: limit,
 );
 
 Future<SearchStatusFfi> searchStatus({required BigInt generation}) =>
@@ -55,11 +105,392 @@ Future<RowBatchFfi> rows({
 Future<String> fullPath({required BigInt generation, required int row}) =>
     RustLib.instance.api.crateApiFullPath(generation: generation, row: row);
 
+/// Rutas completas de varias filas a la vez.
+///
+/// Es lo que necesita el arrastre: el sistema operativo espera **la lista** de
+/// referencias de lo seleccionado. Pedirlas una a una obligaría a bloquear y
+/// soltar el índice tantas veces como archivos haya seleccionados.
+Future<List<String>> pathsForRows({
+  required BigInt generation,
+  required List<int> rows,
+}) => RustLib.instance.api.crateApiPathsForRows(
+  generation: generation,
+  rows: rows,
+);
+
+/// Lista el contenido de una carpeta **desde el índice**, sin tocar el disco.
+///
+/// El resultado se comporta igual que el de una búsqueda: se lee con `rows`, se
+/// ordena con las mismas columnas y se arrastra con `paths_for_rows`. Así el
+/// explorador y el buscador comparten toda la maquinaria en lugar de duplicarla.
+Future<BigInt> browsePath({
+  required String path,
+  required int sortCol,
+  required bool ascending,
+  required int limit,
+}) => RustLib.instance.api.crateApiBrowsePath(
+  path: path,
+  sortCol: sortCol,
+  ascending: ascending,
+  limit: limit,
+);
+
+/// Lista los subdirectorios inmediatos de `path`, desde el índice.
+///
+/// Es lo que alimenta el árbol jerárquico del panel lateral: dado que se lee
+/// de la memoria mapeada no toca el disco, y devolver solo los hijos directos
+/// permite expandir/contraer ramas sin enumerar el árbol entero.
+Future<List<String>> browseSubdirs({required String path}) =>
+    RustLib.instance.api.crateApiBrowseSubdirs(path: path);
+
+/// Lista las raíces de los volúmenes indexados: el punto de partida del árbol.
+Future<BigInt> browseRoots({required int sortCol, required bool ascending}) =>
+    RustLib.instance.api.crateApiBrowseRoots(
+      sortCol: sortCol,
+      ascending: ascending,
+    );
+
+/// Miga de pan de una ruta: cada tramo con su nombre y su ruta completa.
+Future<List<CrumbFfi>> breadcrumb({required String path}) =>
+    RustLib.instance.api.crateApiBreadcrumb(path: path);
+
+/// Carpeta contenedora de una ruta. Cadena vacía si ya es una raíz.
+Future<String> parentPath({required String path}) =>
+    RustLib.instance.api.crateApiParentPath(path: path);
+
 Future<void> revealInExplorer({required BigInt generation, required int row}) =>
     RustLib.instance.api.crateApiRevealInExplorer(
       generation: generation,
       row: row,
     );
+
+Future<void> revealPath({required String pathStr}) =>
+    RustLib.instance.api.crateApiRevealPath(pathStr: pathStr);
+
+Future<void> openFile({required BigInt generation, required int row}) =>
+    RustLib.instance.api.crateApiOpenFile(generation: generation, row: row);
+
+Future<void> openPath({required String pathStr}) =>
+    RustLib.instance.api.crateApiOpenPath(pathStr: pathStr);
+
+/// «Abrir con…»: deja que el sistema pregunte con qué programa.
+Future<void> openWith({required String pathStr}) =>
+    RustLib.instance.api.crateApiOpenWith(pathStr: pathStr);
+
+Future<void> showProperties({required BigInt generation, required int row}) =>
+    RustLib.instance.api.crateApiShowProperties(
+      generation: generation,
+      row: row,
+    );
+
+Future<void> showPropertiesPath({required String pathStr}) =>
+    RustLib.instance.api.crateApiShowPropertiesPath(pathStr: pathStr);
+
+Future<BigInt> fsopCreateFolder({
+  required String parent,
+  required String name,
+}) => RustLib.instance.api.crateApiFsopCreateFolder(parent: parent, name: name);
+
+/// Crea un archivo vacío dentro de `parent`. Equivale a «Nuevo documento».
+Future<BigInt> fsopCreateFile({required String parent, required String name}) =>
+    RustLib.instance.api.crateApiFsopCreateFile(parent: parent, name: name);
+
+Future<BigInt> fsopRename({required String path, required String newName}) =>
+    RustLib.instance.api.crateApiFsopRename(path: path, newName: newName);
+
+Future<BigInt> fsopCopy({
+  required List<String> sources,
+  required String destination,
+  required int policy,
+}) => RustLib.instance.api.crateApiFsopCopy(
+  sources: sources,
+  destination: destination,
+  policy: policy,
+);
+
+Future<BigInt> fsopMove({
+  required List<String> sources,
+  required String destination,
+  required int policy,
+}) => RustLib.instance.api.crateApiFsopMove(
+  sources: sources,
+  destination: destination,
+  policy: policy,
+);
+
+Future<BigInt> fsopDuplicate({required List<String> sources}) =>
+    RustLib.instance.api.crateApiFsopDuplicate(sources: sources);
+
+/// Envía a la papelera. **Nunca borra de forma definitiva.**
+Future<BigInt> fsopTrash({required List<String> sources}) =>
+    RustLib.instance.api.crateApiFsopTrash(sources: sources);
+
+/// Restaura de la papelera a su ubicación original. Windows y Linux únicamente.
+Future<BigInt> fsopRestore({required List<String> paths}) =>
+    RustLib.instance.api.crateApiFsopRestore(paths: paths);
+
+/// Borra del disco de forma definitiva, sin pasar por la papelera.
+///
+/// **No se puede deshacer.** La interfaz solo debe llamarla tras una
+/// confirmación explícita.
+Future<BigInt> fsopDeletePermanently({required List<String> sources}) =>
+    RustLib.instance.api.crateApiFsopDeletePermanently(sources: sources);
+
+/// Estado de todas las operaciones vivas.
+///
+/// La interfaz lo consulta unas pocas veces por segundo: los contadores son
+/// atómicos y leerlos no interrumpe a los hilos que están copiando.
+Future<List<FileOpFfi>> fsopProgressAll() =>
+    RustLib.instance.api.crateApiFsopProgressAll();
+
+Future<void> fsopCancel({required BigInt opId}) =>
+    RustLib.instance.api.crateApiFsopCancel(opId: opId);
+
+/// Responde a un conflicto. `decision`: 0 conservar ambos, 1 omitir,
+/// 2 sobrescribir, 3 cancelar.
+Future<void> fsopResolveConflict({
+  required BigInt opId,
+  required int decision,
+  required bool applyToAll,
+}) => RustLib.instance.api.crateApiFsopResolveConflict(
+  opId: opId,
+  decision: decision,
+  applyToAll: applyToAll,
+);
+
+/// Archiva las operaciones terminadas y avisa al servicio de lo que cambió.
+///
+/// Devuelve cuántas se archivaron. Conviene llamarlo desde el mismo temporizador
+/// que consulta el progreso: es lo que abre la ventana de supresión en el
+/// servicio, y por tanto lo que evita que el cambio se procese dos veces.
+Future<int> fsopReap() => RustLib.instance.api.crateApiFsopReap();
+
+/// ¿Hay algo que deshacer?
+Future<bool> fsopCanUndo() => RustLib.instance.api.crateApiFsopCanUndo();
+
+/// Deshace la última operación reversible. Devuelve los identificadores de las
+/// operaciones lanzadas para revertirla.
+Future<Uint64List> fsopUndoLast() =>
+    RustLib.instance.api.crateApiFsopUndoLast();
+
+/// ¿Hay algo que rehacer? (Algo que se deshizo y no se ha invalidado después.)
+Future<bool> fsopCanRedo() => RustLib.instance.api.crateApiFsopCanRedo();
+
+/// Rehace la última operación que se deshizo. Devuelve los identificadores de
+/// las operaciones lanzadas para recrearla.
+Future<Uint64List> fsopRedoLast() =>
+    RustLib.instance.api.crateApiFsopRedoLast();
+
+/// Ajustes que la interfaz debe usar en esta máquina.
+///
+/// La interfaz pedía dos mil filas de entrada y guardaba diez páginas en
+/// memoria, viniera de un sobremesa o de un portátil de dos núcleos. Pedir dos
+/// mil filas para pintar treinta es trabajo tirado justo en el equipo que menos
+/// puede permitírselo.
+Future<TuningFfi> machineTuning() =>
+    RustLib.instance.api.crateApiMachineTuning();
+
+/// Comunica al servicio si hay licencia activa y hasta cuándo.
+///
+/// Sin esto el servicio no indexa: era el agujero por el que un servicio elevado
+/// recorría el disco entero sin comprobar nada.
+Future<bool> serviceSetLicense({
+  required bool active,
+  required BigInt expiresAt,
+}) => RustLib.instance.api.crateApiServiceSetLicense(
+  active: active,
+  expiresAt: expiresAt,
+);
+
+Future<bool> serviceSetVolumeIndexed({
+  required String mountPrefix,
+  required bool indexed,
+}) => RustLib.instance.api.crateApiServiceSetVolumeIndexed(
+  mountPrefix: mountPrefix,
+  indexed: indexed,
+);
+
+Future<bool> serviceAddFolder({required String path}) =>
+    RustLib.instance.api.crateApiServiceAddFolder(path: path);
+
+Future<bool> serviceRescan({required String mountPrefix}) =>
+    RustLib.instance.api.crateApiServiceRescan(mountPrefix: mountPrefix);
+
+Future<bool> serviceSetIndexing({required bool enabled}) =>
+    RustLib.instance.api.crateApiServiceSetIndexing(enabled: enabled);
+
+Future<ServiceStatusFfi> serviceStatus() =>
+    RustLib.instance.api.crateApiServiceStatus();
+
+/// Un tramo de la miga de pan del explorador.
+class CrumbFfi {
+  final String name;
+  final String path;
+
+  const CrumbFfi({required this.name, required this.path});
+
+  @override
+  int get hashCode => name.hashCode ^ path.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CrumbFfi &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          path == other.path;
+}
+
+/// Estado real del motor, para que la interfaz pueda decir la verdad.
+class EngineStatusFfi {
+  /// Ruta del índice que se está mirando.
+  final String indexPath;
+  final bool fileExists;
+  final BigInt fileSize;
+
+  /// Cierto solo si el índice está mapeado y es utilizable.
+  final bool isOpen;
+  final BigInt generation;
+  final BigInt entryCount;
+
+  /// Código de [`IndexProblem`]: 0 correcto, 1 no existe, 2 formato antiguo,
+  /// 3 dañado, 4 sin permiso, 5 otro.
+  final int problem;
+
+  /// Texto listo para mostrar.
+  final String message;
+
+  const EngineStatusFfi({
+    required this.indexPath,
+    required this.fileExists,
+    required this.fileSize,
+    required this.isOpen,
+    required this.generation,
+    required this.entryCount,
+    required this.problem,
+    required this.message,
+  });
+
+  @override
+  int get hashCode =>
+      indexPath.hashCode ^
+      fileExists.hashCode ^
+      fileSize.hashCode ^
+      isOpen.hashCode ^
+      generation.hashCode ^
+      entryCount.hashCode ^
+      problem.hashCode ^
+      message.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EngineStatusFfi &&
+          runtimeType == other.runtimeType &&
+          indexPath == other.indexPath &&
+          fileExists == other.fileExists &&
+          fileSize == other.fileSize &&
+          isOpen == other.isOpen &&
+          generation == other.generation &&
+          entryCount == other.entryCount &&
+          problem == other.problem &&
+          message == other.message;
+}
+
+/// Estado de una operación de archivo en curso.
+class FileOpFfi {
+  final BigInt id;
+
+  /// 0 crear carpeta, 1 renombrar, 2 copiar, 3 mover, 4 duplicar, 5 papelera.
+  final int kind;
+
+  /// 0 planificando, 1 en marcha, 2 esperando respuesta a un conflicto,
+  /// 3 cancelando, 4 hecho, 5 cancelado, 6 fallido.
+  final int state;
+  final BigInt totalItems;
+  final BigInt doneItems;
+  final BigInt totalBytes;
+  final BigInt doneBytes;
+  final String current;
+  final List<String> errors;
+  final bool canUndo;
+  final BigInt elapsedMs;
+
+  /// Cierto cuando `state == 2` y hay que preguntar al usuario.
+  final bool hasConflict;
+  final String conflictSource;
+  final String conflictDestination;
+  final BigInt conflictSourceSize;
+  final BigInt conflictDestinationSize;
+  final int conflictSourceMtime;
+  final int conflictDestinationMtime;
+
+  const FileOpFfi({
+    required this.id,
+    required this.kind,
+    required this.state,
+    required this.totalItems,
+    required this.doneItems,
+    required this.totalBytes,
+    required this.doneBytes,
+    required this.current,
+    required this.errors,
+    required this.canUndo,
+    required this.elapsedMs,
+    required this.hasConflict,
+    required this.conflictSource,
+    required this.conflictDestination,
+    required this.conflictSourceSize,
+    required this.conflictDestinationSize,
+    required this.conflictSourceMtime,
+    required this.conflictDestinationMtime,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      kind.hashCode ^
+      state.hashCode ^
+      totalItems.hashCode ^
+      doneItems.hashCode ^
+      totalBytes.hashCode ^
+      doneBytes.hashCode ^
+      current.hashCode ^
+      errors.hashCode ^
+      canUndo.hashCode ^
+      elapsedMs.hashCode ^
+      hasConflict.hashCode ^
+      conflictSource.hashCode ^
+      conflictDestination.hashCode ^
+      conflictSourceSize.hashCode ^
+      conflictDestinationSize.hashCode ^
+      conflictSourceMtime.hashCode ^
+      conflictDestinationMtime.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FileOpFfi &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          kind == other.kind &&
+          state == other.state &&
+          totalItems == other.totalItems &&
+          doneItems == other.doneItems &&
+          totalBytes == other.totalBytes &&
+          doneBytes == other.doneBytes &&
+          current == other.current &&
+          errors == other.errors &&
+          canUndo == other.canUndo &&
+          elapsedMs == other.elapsedMs &&
+          hasConflict == other.hasConflict &&
+          conflictSource == other.conflictSource &&
+          conflictDestination == other.conflictDestination &&
+          conflictSourceSize == other.conflictSourceSize &&
+          conflictDestinationSize == other.conflictDestinationSize &&
+          conflictSourceMtime == other.conflictSourceMtime &&
+          conflictDestinationMtime == other.conflictDestinationMtime;
+}
 
 class RowBatchFfi {
   final BigInt generation;
@@ -145,4 +576,113 @@ class SearchStatusFfi {
           isComplete == other.isComplete &&
           generation == other.generation &&
           elapsedMs == other.elapsedMs;
+}
+
+/// Lo que el servicio dice de sí mismo.
+class ServiceStatusFfi {
+  final bool reachable;
+  final bool indexingEnabled;
+  final bool licenseActive;
+  final BigInt generation;
+  final BigInt entryCount;
+  final List<String> volumePrefixes;
+  final List<String> volumeLabels;
+  final List<String> volumeFsTypes;
+  final List<bool> volumeConnected;
+  final List<bool> volumeIndexed;
+  final Uint64List volumeEntryCounts;
+
+  const ServiceStatusFfi({
+    required this.reachable,
+    required this.indexingEnabled,
+    required this.licenseActive,
+    required this.generation,
+    required this.entryCount,
+    required this.volumePrefixes,
+    required this.volumeLabels,
+    required this.volumeFsTypes,
+    required this.volumeConnected,
+    required this.volumeIndexed,
+    required this.volumeEntryCounts,
+  });
+
+  @override
+  int get hashCode =>
+      reachable.hashCode ^
+      indexingEnabled.hashCode ^
+      licenseActive.hashCode ^
+      generation.hashCode ^
+      entryCount.hashCode ^
+      volumePrefixes.hashCode ^
+      volumeLabels.hashCode ^
+      volumeFsTypes.hashCode ^
+      volumeConnected.hashCode ^
+      volumeIndexed.hashCode ^
+      volumeEntryCounts.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServiceStatusFfi &&
+          runtimeType == other.runtimeType &&
+          reachable == other.reachable &&
+          indexingEnabled == other.indexingEnabled &&
+          licenseActive == other.licenseActive &&
+          generation == other.generation &&
+          entryCount == other.entryCount &&
+          volumePrefixes == other.volumePrefixes &&
+          volumeLabels == other.volumeLabels &&
+          volumeFsTypes == other.volumeFsTypes &&
+          volumeConnected == other.volumeConnected &&
+          volumeIndexed == other.volumeIndexed &&
+          volumeEntryCounts == other.volumeEntryCounts;
+}
+
+/// Ajustes derivados de la máquina, para que la interfaz también se adapte.
+class TuningFfi {
+  /// 0 baja, 1 media, 2 alta.
+  final int tier;
+  final String tierName;
+  final int cores;
+  final BigInt memoryMb;
+  final int searchThreads;
+
+  /// Filas que conviene pedir de entrada.
+  final int initialLimit;
+
+  /// Páginas de filas que conviene mantener en memoria.
+  final int cachedPages;
+
+  const TuningFfi({
+    required this.tier,
+    required this.tierName,
+    required this.cores,
+    required this.memoryMb,
+    required this.searchThreads,
+    required this.initialLimit,
+    required this.cachedPages,
+  });
+
+  @override
+  int get hashCode =>
+      tier.hashCode ^
+      tierName.hashCode ^
+      cores.hashCode ^
+      memoryMb.hashCode ^
+      searchThreads.hashCode ^
+      initialLimit.hashCode ^
+      cachedPages.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TuningFfi &&
+          runtimeType == other.runtimeType &&
+          tier == other.tier &&
+          tierName == other.tierName &&
+          cores == other.cores &&
+          memoryMb == other.memoryMb &&
+          searchThreads == other.searchThreads &&
+          initialLimit == other.initialLimit &&
+          cachedPages == other.cachedPages;
 }

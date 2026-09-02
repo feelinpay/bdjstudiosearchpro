@@ -28,7 +28,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  CrumbFfi dco_decode_crumb_ffi(dynamic raw);
+
+  @protected
+  EngineStatusFfi dco_decode_engine_status_ffi(dynamic raw);
+
+  @protected
+  FileOpFfi dco_decode_file_op_ffi(dynamic raw);
+
+  @protected
   List<String> dco_decode_list_String(dynamic raw);
+
+  @protected
+  List<bool> dco_decode_list_bool(dynamic raw);
+
+  @protected
+  List<CrumbFfi> dco_decode_list_crumb_ffi(dynamic raw);
+
+  @protected
+  List<FileOpFfi> dco_decode_list_file_op_ffi(dynamic raw);
+
+  @protected
+  List<int> dco_decode_list_prim_u_32_loose(dynamic raw);
 
   @protected
   Uint32List dco_decode_list_prim_u_32_strict(dynamic raw);
@@ -44,6 +65,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SearchStatusFfi dco_decode_search_status_ffi(dynamic raw);
+
+  @protected
+  ServiceStatusFfi dco_decode_service_status_ffi(dynamic raw);
+
+  @protected
+  TuningFfi dco_decode_tuning_ffi(dynamic raw);
 
   @protected
   int dco_decode_u_32(dynamic raw);
@@ -64,7 +91,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  CrumbFfi sse_decode_crumb_ffi(SseDeserializer deserializer);
+
+  @protected
+  EngineStatusFfi sse_decode_engine_status_ffi(SseDeserializer deserializer);
+
+  @protected
+  FileOpFfi sse_decode_file_op_ffi(SseDeserializer deserializer);
+
+  @protected
   List<String> sse_decode_list_String(SseDeserializer deserializer);
+
+  @protected
+  List<bool> sse_decode_list_bool(SseDeserializer deserializer);
+
+  @protected
+  List<CrumbFfi> sse_decode_list_crumb_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<FileOpFfi> sse_decode_list_file_op_ffi(SseDeserializer deserializer);
+
+  @protected
+  List<int> sse_decode_list_prim_u_32_loose(SseDeserializer deserializer);
 
   @protected
   Uint32List sse_decode_list_prim_u_32_strict(SseDeserializer deserializer);
@@ -80,6 +128,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SearchStatusFfi sse_decode_search_status_ffi(SseDeserializer deserializer);
+
+  @protected
+  ServiceStatusFfi sse_decode_service_status_ffi(SseDeserializer deserializer);
+
+  @protected
+  TuningFfi sse_decode_tuning_ffi(SseDeserializer deserializer);
 
   @protected
   int sse_decode_u_32(SseDeserializer deserializer);
@@ -103,7 +157,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_crumb_ffi(CrumbFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_engine_status_ffi(
+    EngineStatusFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_file_op_ffi(FileOpFfi self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_bool(List<bool> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_crumb_ffi(List<CrumbFfi> self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_list_file_op_ffi(
+    List<FileOpFfi> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_prim_u_32_loose(
+    List<int> self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_list_prim_u_32_strict(
@@ -131,6 +215,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     SearchStatusFfi self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_service_status_ffi(
+    ServiceStatusFfi self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_tuning_ffi(TuningFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_u_32(int self, SseSerializer serializer);

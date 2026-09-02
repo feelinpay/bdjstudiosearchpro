@@ -21,6 +21,84 @@ class FileRow {
   bool get isHidden => (flags & 0x02) != 0;
   bool get isDisconnected => (flags & 0x08) != 0;
 
+  /// Etiqueta de tipo, idéntica a la del orden por «Tipo» del motor.
+  String get tipoLabel {
+    if (isDirectory) return 'Carpeta';
+    switch (extension.toLowerCase()) {
+      case 'wav':
+      case 'flac':
+      case 'aiff':
+      case 'aif':
+      case 'mp3':
+      case 'm4a':
+      case 'ogg':
+      case 'opus':
+      case 'wma':
+      case 'alac':
+      case 'ape':
+      case 'wv':
+      case 'aac':
+        return 'Audio';
+      case 'mp4':
+      case 'mov':
+      case 'avi':
+      case 'mkv':
+      case 'm4v':
+      case 'webm':
+      case 'mpg':
+      case 'mpeg':
+      case 'wmv':
+      case 'flv':
+        return 'Vídeo';
+      case 'jpg':
+      case 'jpeg':
+      case 'png':
+      case 'gif':
+      case 'webp':
+      case 'heic':
+      case 'tiff':
+      case 'bmp':
+      case 'svg':
+      case 'psd':
+        return 'Imagen';
+      case 'pdf':
+      case 'docx':
+      case 'doc':
+      case 'txt':
+      case 'rtf':
+      case 'odt':
+      case 'xlsx':
+      case 'pptx':
+      case 'md':
+        return 'Documento';
+      case 'als':
+      case 'flp':
+      case 'ptx':
+      case 'cpr':
+      case 'logicx':
+      case 'rpp':
+        return 'Proyecto';
+      case 'zip':
+      case 'rar':
+      case '7z':
+      case 'tar':
+      case 'gz':
+      case 'bz2':
+        return 'Comprimido';
+      case 'exe':
+      case 'msi':
+      case 'app':
+      case 'dll':
+      case 'dmg':
+      case 'pkg':
+        return 'Aplicación';
+      case '':
+        return 'Sin extensión';
+      default:
+        return 'Otro';
+    }
+  }
+
   String get fullPath {
     if (path.endsWith('\\') || path.endsWith('/')) {
       return '$path$name';

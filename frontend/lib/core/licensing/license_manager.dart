@@ -43,9 +43,9 @@ class LicenseManager implements LicensingPort {
   LicenseManager({
     required this.secureStorage,
     required this.fingerprint,
-    this.productCode = 'bdj_studio_search_pro',
+    String? productCode,
     this.defaultAppVersion = '1.0.0',
-  });
+  }) : productCode = productCode ?? BdjProduct.searchPro.code;
 
   @override
   LicenseStatus get currentStatus => _currentStatus;

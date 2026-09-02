@@ -1,152 +1,561 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../core/ffi/api.dart' as ffi;
-import '../models/file_row.dart';
 
+import '../../../core/ffi/api.dart' as ffi;
+import '../models/engine_health.dart';
+import '../models/file_row.dart';
+import '../models/row_cache.dart';
+import '../models/selection.dart';
+import '../models/view_mode.dart';
+
+/// Qué está mostrando la tabla.
+enum ViewMode {
+  /// El resultado de una consulta.
+  search,
+
+  /// El contenido de una carpeta, leído del índice.
+  browse,
+}
+
+@immutable
 class SearchState {
+  final ViewMode mode;
   final String query;
   final String activeFilter;
-  final int sortCol; // 0: Name, 1: Path, 2: Ext, 3: Size, 4: Date
+
+  /// Carpeta abierta cuando `mode` es `browse`.
+  final String browsePath;
+
+  /// Carpeta a la que se acota la búsqueda. Vacío significa todo el equipo.
+  ///
+  /// Es lo que hace que esto se comporte como un explorador y no como un
+  /// buscador con una carpeta pegada al lado: escribir en la caja filtra **la
+  /// carpeta en la que estás**, igual que en el Explorador de Windows o en el
+  /// Finder, y hay un interruptor para ampliar a todo el equipo.
+  final String searchScope;
+
+  /// Cierto cuando el usuario ha pedido buscar en todo el equipo aunque esté
+  /// dentro de una carpeta.
+  final bool searchEverywhere;
+
+  final List<String> history;
+  final int historyIndex;
+
+  /// 0 Nombre · 1 Ruta · 2 Extensión · 3 Tamaño · 4 Modificado · 5 Creado
+  final int sortCol;
   final bool ascending;
+
+  /// Cómo se pintan los resultados de la tabla.
+  final ResultViewMode viewMode;
+
   final BigInt? generation;
+
+  /// Coincidencias totales. Exacto aunque solo se hayan pedido las primeras.
   final int totalCount;
+
+  /// Filas que el motor tiene listas para entregar.
   final int readyCount;
   final int elapsedMs;
-  final int selectedIndex;
-  final bool isIndexLoaded;
-  final bool isLoadingMore;
-  final List<FileRow> visibleRows;
+
+  final Selection selection;
+  final EngineHealth engine;
+
+  final bool isCaseSensitive;
+  final bool isPathMatch;
+  final bool isRegex;
+  final bool isSearching;
+
+  /// Cambia cuando la caché de filas se mueve, para que la tabla se repinte.
+  final int revision;
 
   const SearchState({
+    this.mode = ViewMode.browse,
     this.query = '',
     this.activeFilter = 'Todos',
+    this.browsePath = '',
+    this.searchScope = '',
+    this.searchEverywhere = false,
+    this.history = const [],
+    this.historyIndex = -1,
     this.sortCol = 0,
     this.ascending = true,
+    this.viewMode = ResultViewMode.details,
     this.generation,
     this.totalCount = 0,
     this.readyCount = 0,
     this.elapsedMs = 0,
-    this.selectedIndex = 0,
-    this.isIndexLoaded = false,
-    this.isLoadingMore = false,
-    this.visibleRows = const [],
+    this.selection = Selection.empty,
+    this.engine = EngineHealth.checking,
+    this.isCaseSensitive = false,
+    this.isPathMatch = false,
+    this.isRegex = false,
+    this.isSearching = false,
+    this.revision = 0,
   });
 
+  /// Hasta dónde puede llegar la tabla.
+  ///
+  /// El motor entrega una ventana ordenada, no el conjunto entero: pedir la fila
+  /// nueve millones exigiría ordenar nueve millones de elementos para enseñar
+  /// treinta. Doscientas mil filas son muchas más de las que nadie recorre a
+  /// mano, y el contador sigue diciendo el total de verdad.
+  static const int maxAddressableRows = 200000;
+
+  /// Filas direccionables. `totalCount` sigue siendo el número real de
+  /// coincidencias.
+  int get rowCount =>
+      totalCount < maxAddressableRows ? totalCount : maxAddressableRows;
+
+  /// Cierto cuando hay más coincidencias de las que la tabla puede recorrer.
+  bool get isTruncated => totalCount > maxAddressableRows;
+
   BigInt get effectiveGeneration => generation ?? BigInt.zero;
-  bool get hasMore => visibleRows.length < readyCount;
+  bool get isIndexLoaded => engine.isOpen;
+  bool get canGoBack => historyIndex > 0;
+  bool get canGoForward => historyIndex >= 0 && historyIndex < history.length - 1;
 
   SearchState copyWith({
+    ViewMode? mode,
     String? query,
     String? activeFilter,
+    String? browsePath,
+    String? searchScope,
+    bool? searchEverywhere,
+    List<String>? history,
+    int? historyIndex,
     int? sortCol,
     bool? ascending,
+    ResultViewMode? viewMode,
     BigInt? generation,
     int? totalCount,
     int? readyCount,
     int? elapsedMs,
-    int? selectedIndex,
-    bool? isIndexLoaded,
-    bool? isLoadingMore,
-    List<FileRow>? visibleRows,
+    Selection? selection,
+    EngineHealth? engine,
+    bool? isCaseSensitive,
+    bool? isPathMatch,
+    bool? isRegex,
+    bool? isSearching,
+    int? revision,
   }) {
     return SearchState(
+      mode: mode ?? this.mode,
       query: query ?? this.query,
       activeFilter: activeFilter ?? this.activeFilter,
+      browsePath: browsePath ?? this.browsePath,
+      searchScope: searchScope ?? this.searchScope,
+      searchEverywhere: searchEverywhere ?? this.searchEverywhere,
+      history: history ?? this.history,
+      historyIndex: historyIndex ?? this.historyIndex,
       sortCol: sortCol ?? this.sortCol,
       ascending: ascending ?? this.ascending,
+      viewMode: viewMode ?? this.viewMode,
       generation: generation ?? this.generation,
       totalCount: totalCount ?? this.totalCount,
       readyCount: readyCount ?? this.readyCount,
       elapsedMs: elapsedMs ?? this.elapsedMs,
-      selectedIndex: selectedIndex ?? this.selectedIndex,
-      isIndexLoaded: isIndexLoaded ?? this.isIndexLoaded,
-      isLoadingMore: isLoadingMore ?? this.isLoadingMore,
-      visibleRows: visibleRows ?? this.visibleRows,
+      selection: selection ?? this.selection,
+      engine: engine ?? this.engine,
+      isCaseSensitive: isCaseSensitive ?? this.isCaseSensitive,
+      isPathMatch: isPathMatch ?? this.isPathMatch,
+      isRegex: isRegex ?? this.isRegex,
+      isSearching: isSearching ?? this.isSearching,
+      revision: revision ?? this.revision,
     );
   }
 }
 
 class SearchNotifier extends StateNotifier<SearchState> {
   SearchNotifier() : super(const SearchState()) {
-    initEngine();
+    _init();
   }
 
-  /// Cada cuánto se comprueba si el servicio publicó un índice nuevo.
+  /// Cuánto se espera antes de consultar tras la última tecla.
   ///
-  /// Solo se lee la cabecera del archivo, que son microsegundos; la consulta
-  /// únicamente se repite cuando la generación cambió de verdad.
-  static const _reloadInterval = Duration(seconds: 1);
+  /// Sin esto se lanzaba una búsqueda por pulsación, incluidas las que el
+  /// usuario iba a sustituir cien milisegundos después. Ciento veinte
+  /// milisegundos es la pausa natural entre teclas al escribir de corrido: no se
+  /// nota y descarta la mayoría del trabajo inútil.
+  static const _debounce = Duration(milliseconds: 120);
 
-  Timer? _reloadTimer;
+  /// Cuánto espera la interfaz a que el motor anuncie una generación nueva.
+  ///
+  /// No se sondea con un temporizador: `waitIndexChanged` bloquea en el hilo
+  /// nativo y solo devuelve cuando el servicio republicó (o se agota este
+  /// plazo, para poder reintentar). El refresco es empujado, tipo socket.
+  static const _reloadTimeout = Duration(milliseconds: 3000);
 
-  Future<void> initEngine() async {
+  /// Ventana que se le pide al motor de entrada.
+  ///
+  /// No es una constante: sale del perfil de la máquina. Pedir dos mil filas
+  /// para pintar treinta es trabajo tirado justo en el equipo que menos puede
+  /// permitírselo. Hasta que el motor conteste se usa un valor prudente.
+  int _initialLimit = 500;
+
+  /// Hasta dónde se amplía la ventana cuando el usuario baja de verdad.
+  static const _maxLimit = SearchState.maxAddressableRows;
+
+  Timer? _debounceTimer;
+  final RowCache _cache = RowCache();
+
+  /// Número de la última petición lanzada.
+  ///
+  /// Las respuestas llegan por un canal asíncrono y pueden llegar
+  /// desordenadas: sin esto, el resultado de «mich» podía pisar al de
+  /// «michael» y dejar en pantalla algo que el usuario ya no había pedido.
+  int _seq = 0;
+
+  Future<void> _init() async {
+    await _aplicarPerfilDeMaquina();
+    await _refreshEngine();
     _startWatchingIndex();
-    await _tryOpenEngine();
   }
 
-  Future<bool> _tryOpenEngine() async {
+  /// Ajusta la ventana y la caché a lo que este equipo puede sostener.
+  Future<void> _aplicarPerfilDeMaquina() async {
+    try {
+      final t = await ffi.machineTuning();
+      _initialLimit = t.initialLimit;
+      _cache.resize(maxPages: t.cachedPages);
+      debugPrint(
+        'Perfil de máquina: gama ${t.tierName}, ${t.cores} núcleos, '
+        '${t.memoryMb} MB, ${t.searchThreads} hilos de búsqueda, '
+        'ventana ${t.initialLimit}, ${t.cachedPages} páginas en caché',
+      );
+    } catch (e) {
+      // Sin perfil se sigue con los valores prudentes de arriba: es una
+      // optimización, no un requisito para funcionar.
+      debugPrint('No se pudo leer el perfil de la máquina: $e');
+    }
+  }
+
+  // ─────────────────────────── Estado del motor ───────────────────────────
+
+  /// Pregunta al motor cómo está y actualiza el estado.
+  Future<void> _refreshEngine() async {
     try {
       await ffi.engineOpen(indexPathStr: '');
-      state = state.copyWith(isIndexLoaded: true);
-      await searchFiles(state.query);
-      return true;
+    } catch (_) {
+      // El motivo concreto lo cuenta `engineStatus`; aquí no hace falta nada.
+    }
+    await _readEngineStatus();
+    if (!state.engine.isOpen) return;
+    if (state.query.isNotEmpty) {
+      await _runSearch(state.query);
+    } else {
+      // Arranca enseñando algo, como cualquier explorador de archivos.
+      //
+      // Antes la primera pantalla estaba en blanco hasta que el usuario
+      // escribía: eso ya de por sí no parece un explorador, parece un cuadro de
+      // búsqueda. Con la ruta vacía se listan los volúmenes, que es el
+      // equivalente a «Este equipo».
+      await _runBrowse(state.browsePath, pushHistory: state.history.isEmpty);
+    }
+  }
+
+  Future<void> _readEngineStatus() async {
+    final esPrimeraLectura = state.engine.isChecking;
+    try {
+      final s = await ffi.engineStatus();
+      if (!mounted) return;
+      state = state.copyWith(
+        engine: EngineHealth(
+          isOpen: s.isOpen,
+          indexPath: s.indexPath,
+          fileExists: s.fileExists,
+          fileSize: s.fileSize.toInt(),
+          generation: s.generation.toInt(),
+          entryCount: s.entryCount.toInt(),
+          problem: IndexProblem.fromCode(s.problem),
+          message: s.message,
+          isChecking: false,
+          // Solo se sella `decidedAt` en la primera lectura con veredicto. A
+          // partir de ahí, los sucesivos `_readEngineStatus` no reinician el
+          // periodo de gracia.
+          decidedAt: esPrimeraLectura ? DateTime.now() : state.engine.decidedAt,
+        ),
+      );
     } catch (e) {
-      debugPrint('Motor de búsqueda aún no disponible: $e');
-      state = state.copyWith(isIndexLoaded: false);
-      return false;
+      if (!mounted) return;
+      state = state.copyWith(
+        engine: EngineHealth(
+          problem: IndexProblem.unknown,
+          message: 'No se pudo consultar el motor: $e',
+          isChecking: false,
+          decidedAt: esPrimeraLectura ? DateTime.now() : state.engine.decidedAt,
+        ),
+      );
     }
   }
 
   /// Mantiene la lista al día cuando cambian los archivos del disco.
   ///
-  /// El servicio republica el índice al calmarse la actividad; sin este sondeo
-  /// la aplicación seguiría mostrando el estado del arranque por muy al día que
-  /// estuviera el índice en disco.
-  void _startWatchingIndex() {
-    _reloadTimer?.cancel();
-    _reloadTimer = Timer.periodic(_reloadInterval, (_) async {
-      if (!mounted) return;
-      if (!state.isIndexLoaded) {
-        await _tryOpenEngine();
-        return;
-      }
+  /// Se queda a la espera de que el motor publique una generación nueva
+  /// (`waitIndexChanged`), así que el refresco llega "empujado" —como un
+  /// socket— y no con sondeos periódicos desde Flutter.
+  Future<void> _startWatchingIndex() async {
+    while (mounted) {
       try {
-        final changed = await ffi.reloadIfChanged();
-        if (changed && mounted) {
+        final changed = await ffi.waitIndexChanged(
+          timeoutMs: BigInt.from(_reloadTimeout.inMilliseconds),
+        );
+        if (!mounted) return;
+        if (!state.engine.isOpen) {
+          await _refreshEngine();
+          continue;
+        }
+        if (changed) {
           // Los identificadores del resultado anterior apuntan al índice viejo,
-          // así que la consulta se repite entera en vez de refrescar filas.
-          await searchFiles(state.query);
+          // así que se repite la consulta entera en vez de refrescar filas.
+          await _readEngineStatus();
+          await _repeatCurrentView();
         }
       } catch (_) {
-        // Un fallo puntual al remapear no debe tumbar la interfaz.
+        // Un fallo puntual al remapear no debe tumbar la interfaz; se reintenta
+        // cuando la espera se agote.
       }
-    });
+    }
   }
 
   @override
   void dispose() {
-    _reloadTimer?.cancel();
+    _debounceTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> searchFiles(String q) async {
-    final effectiveQuery = _buildEffectiveQuery(q, state.activeFilter);
+  // ───────────────────────────── Consulta ─────────────────────────────
+
+  /// Lo que llama la barra de búsqueda en cada tecla.
+  /// Escribir en la caja **filtra la carpeta en la que estás**.
+  ///
+  /// Es la diferencia entre un explorador con búsqueda rápida y un buscador con
+  /// una carpeta al lado. Al vaciar la caja se vuelve al contenido de la
+  /// carpeta, no a una lista vacía: borrar lo que has escrito no debería
+  /// dejarte en ningún sitio.
+  void setQuery(String q) {
+    _debounceTimer?.cancel();
+
+    if (q.trim().isEmpty) {
+      state = state.copyWith(query: '');
+      _runBrowse(state.browsePath, pushHistory: false);
+      return;
+    }
+
+    // El ámbito se fija al empezar a escribir y no cambia mientras se teclea:
+    // así la lista no salta de carpeta a mitad de una palabra.
+    final ambito = state.mode == ViewMode.browse ? state.browsePath : state.searchScope;
+    state = state.copyWith(query: q, mode: ViewMode.search, searchScope: ambito);
+    _debounceTimer = Timer(_debounce, () => _runSearch(q));
+  }
+
+  /// Alterna entre buscar en la carpeta actual y buscar en todo el equipo.
+  void toggleSearchEverywhere() {
+    state = state.copyWith(searchEverywhere: !state.searchEverywhere);
+    if (state.query.trim().isNotEmpty) searchNow();
+  }
+
+  /// Lanza la búsqueda ahora mismo, sin esperar.
+  Future<void> searchNow() {
+    _debounceTimer?.cancel();
+    return _runSearch(state.query);
+  }
+
+  /// Compatibilidad con las llamadas existentes.
+  Future<void> searchFiles(String q) {
+    _debounceTimer?.cancel();
+    return _runSearch(q);
+  }
+
+  Future<void> _repeatCurrentView() {
+    return state.mode == ViewMode.browse
+        ? _runBrowse(state.browsePath, pushHistory: false)
+        : _runSearch(state.query);
+  }
+
+  Future<void> _runSearch(String q) async {
+    final seq = ++_seq;
+    final consulta = _buildEffectiveQuery(q, state.activeFilter);
+    state = state.copyWith(isSearching: true, query: q, mode: ViewMode.search);
+
     try {
-      final gen = await ffi.search(
-        query: effectiveQuery,
+      final gen = await ffi.searchWithLimit(
+        query: consulta,
+        scope: _ambitoEfectivo,
         sortCol: state.sortCol,
         ascending: state.ascending,
+        limit: _initialLimit,
       );
-
       final status = await ffi.searchStatus(generation: gen);
-      final batch = await ffi.rows(generation: gen, offset: 0, count: 200);
+      if (!mounted || seq != _seq) return; // llegó tarde: ya no interesa
 
-      final rowsList = <FileRow>[];
+      _cache.clear();
+      state = state.copyWith(
+        generation: gen,
+        totalCount: status.totalCount,
+        readyCount: status.readyCount,
+        elapsedMs: status.elapsedMs.toInt(),
+        selection: Selection(total: status.totalCount),
+        isSearching: false,
+        revision: state.revision + 1,
+      );
+      await _loadPage(0);
+    } catch (e) {
+      if (!mounted || seq != _seq) return;
+      _cache.clear();
+      state = state.copyWith(
+        totalCount: 0,
+        readyCount: 0,
+        elapsedMs: 0,
+        selection: Selection.empty,
+        isSearching: false,
+        revision: state.revision + 1,
+      );
+      debugPrint('La búsqueda falló: $e');
+    }
+  }
+
+  // ───────────────────────────── Navegación ─────────────────────────────
+
+  /// Abre una carpeta leyendo sus hijos **del índice**, sin tocar el disco.
+  Future<bool> openFolder(String path) => _runBrowse(path, pushHistory: true);
+
+  Future<bool> _runBrowse(String path, {required bool pushHistory}) async {
+    final seq = ++_seq;
+    state = state.copyWith(isSearching: true);
+
+    try {
+      final gen = path.isEmpty
+          ? await ffi.browseRoots(sortCol: state.sortCol, ascending: state.ascending)
+          : await ffi.browsePath(
+              path: path,
+              sortCol: state.sortCol,
+              ascending: state.ascending,
+              limit: _initialLimit,
+            );
+      final status = await ffi.searchStatus(generation: gen);
+      if (!mounted || seq != _seq) return false;
+
+      var historial = state.history;
+      var indice = state.historyIndex;
+      if (pushHistory) {
+        // Al navegar desde un punto intermedio del historial, lo que había
+        // delante se descarta: es como se comporta cualquier navegador.
+        historial = [...historial.take(indice + 1), path];
+        indice = historial.length - 1;
+      }
+
+      _cache.clear();
+      state = state.copyWith(
+        mode: ViewMode.browse,
+        browsePath: path,
+        history: historial,
+        historyIndex: indice,
+        generation: gen,
+        totalCount: status.totalCount,
+        readyCount: status.readyCount,
+        elapsedMs: status.elapsedMs.toInt(),
+        selection: Selection(total: status.totalCount),
+        isSearching: false,
+        revision: state.revision + 1,
+      );
+      await _loadPage(0);
+      return true;
+    } catch (e) {
+      if (!mounted || seq != _seq) return false;
+      state = state.copyWith(isSearching: false);
+      debugPrint('No se pudo abrir la carpeta: $e');
+      return false;
+    }
+  }
+
+  Future<void> goBack() async {
+    if (!state.canGoBack) return;
+    final destino = state.history[state.historyIndex - 1];
+    state = state.copyWith(historyIndex: state.historyIndex - 1);
+    await _runBrowse(destino, pushHistory: false);
+  }
+
+  Future<void> goForward() async {
+    if (!state.canGoForward) return;
+    final destino = state.history[state.historyIndex + 1];
+    state = state.copyWith(historyIndex: state.historyIndex + 1);
+    await _runBrowse(destino, pushHistory: false);
+  }
+
+  /// Sube un nivel. Desde una raíz de volumen lleva a la lista de unidades.
+  Future<void> goUp() async {
+    if (state.mode != ViewMode.browse) return;
+    final padre = await ffi.parentPath(path: state.browsePath);
+    await openFolder(padre);
+  }
+
+  /// Vuelve al buscador.
+  ///
+  /// Con la caja vacía no hay nada que buscar, así que se queda donde está: un
+  /// resultado vacío borraría de la pantalla el contenido de la carpeta sin que
+  /// el usuario haya pedido nada.
+  Future<void> goToSearch() async {
+    if (state.query.trim().isEmpty) return;
+    state = state.copyWith(mode: ViewMode.search, searchScope: state.browsePath);
+    await _runSearch(state.query);
+  }
+
+  /// Abandona la búsqueda y vuelve al contenido de la carpeta.
+  ///
+  /// Salir de una búsqueda tiene que devolverte a donde estabas, no a una lista
+  /// vacía: es la diferencia entre cerrar un filtro y perder el sitio.
+  Future<void> exitSearch() async {
+    state = state.copyWith(query: '', searchEverywhere: false);
+    await _runBrowse(state.browsePath, pushHistory: false);
+  }
+
+  Future<List<ffi.CrumbFfi>> breadcrumbOf(String path) => ffi.breadcrumb(path: path);
+
+  // ─────────────────────────────── Filas ───────────────────────────────
+
+  /// La fila `index`, si ya está cargada. Si no, la pide y devuelve `null`.
+  ///
+  /// La tabla la llama solo para las filas visibles, así que en memoria hay
+  /// como mucho unas dos mil, tenga el resultado tres o nueve millones.
+  FileRow? rowAt(int index) {
+    final fila = _cache.rowAt(index);
+    if (fila != null) return fila;
+    final page = _cache.pageOf(index);
+    if (!_cache.isLoading(page)) {
+      // Sin `await`: la tabla no puede esperar a que llegue nada.
+      unawaited(_loadPage(page));
+    }
+    return null;
+  }
+
+  Future<void> _loadPage(int page) async {
+    final gen = state.generation;
+    if (gen == null) return;
+    if (_cache.hasPage(page) || _cache.isLoading(page)) return;
+    _cache.markLoading(page);
+
+    final offset = page * _cache.pageSize;
+
+    // Si la página cae más allá de lo que el motor tiene preparado, se le pide
+    // una ventana mayor. Solo ocurre cuando el usuario baja de verdad.
+    if (offset >= state.readyCount && state.readyCount < state.totalCount) {
+      await _extendWindow(offset + _cache.pageSize * 2);
+    }
+
+    try {
+      final batch = await ffi.rows(
+        generation: state.effectiveGeneration,
+        offset: offset,
+        count: _cache.pageSize,
+      );
+      if (!mounted) return;
+      final filas = <FileRow>[];
       for (var i = 0; i < batch.count; i++) {
-        rowsList.add(FileRow(
+        filas.add(FileRow(
           index: batch.offset + i,
           name: batch.names[i],
           path: batch.paths[i],
@@ -156,140 +565,325 @@ class SearchNotifier extends StateNotifier<SearchState> {
           flags: batch.flags[i],
         ));
       }
-
-      state = state.copyWith(
-        query: q,
-        generation: gen,
-        totalCount: status.totalCount,
-        readyCount: status.readyCount,
-        elapsedMs: status.elapsedMs.toInt(),
-        selectedIndex: 0,
-        visibleRows: rowsList,
-      );
-    } catch (_) {
-      state = state.copyWith(query: q);
+      _cache.put(page, filas);
+      state = state.copyWith(revision: state.revision + 1);
+    } catch (e) {
+      _cache.failed(page);
+      debugPrint('No se pudo cargar la página $page: $e');
     }
   }
 
-  String _buildEffectiveQuery(String userQuery, String filter) {
-    var prefix = '';
-    switch (filter) {
-      case 'Audio':
-        prefix = 'tipo:audio ';
-        break;
-      case 'Proyectos DJ':
-        prefix = 'tipo:dj ';
-        break;
-      case 'Vídeo':
-        prefix = 'tipo:video ';
-        break;
-      case 'Imagen':
-        prefix = 'tipo:imagen ';
-        break;
-      case 'Documentos':
-        prefix = 'tipo:documentos ';
-        break;
-      case 'Comprimidos':
-        prefix = 'tipo:comprimidos ';
-        break;
-      case 'Aplicaciones':
-        prefix = 'tipo:apps ';
-        break;
-      case 'Carpetas':
-        prefix = 'folder: ';
-        break;
-      default:
-        prefix = '';
+  /// Pide al motor una ventana mayor sin cambiar la consulta.
+  Future<void> _extendWindow(int hasta) async {
+    final objetivo = hasta.clamp(_initialLimit, _maxLimit);
+    if (objetivo <= state.readyCount) return;
+    try {
+      final gen = await ffi.extendResults(
+        generation: state.effectiveGeneration,
+        limit: objetivo,
+      );
+      final status = await ffi.searchStatus(generation: gen);
+      if (!mounted) return;
+      if (gen != state.effectiveGeneration) {
+        // La ventana nueva renumera las filas: la caché anterior ya no sirve.
+        _cache.clear();
+      }
+      state = state.copyWith(
+        generation: gen,
+        readyCount: status.readyCount,
+        totalCount: status.totalCount,
+        revision: state.revision + 1,
+      );
+    } catch (e) {
+      debugPrint('No se pudo ampliar la ventana: $e');
     }
-    return '$prefix$userQuery'.trim();
+  }
+
+  // ───────────────────────────── Selección ─────────────────────────────
+
+  void selectRow(int index, {bool multi = false, bool range = false}) {
+    if (index < 0 || index >= state.totalCount) return;
+    final s = state.selection.withTotal(state.totalCount);
+    final nueva = range
+        ? s.range(index)
+        : multi
+            ? s.toggle(index)
+            : s.single(index);
+    state = state.copyWith(selection: nueva);
+  }
+
+  /// Selecciona **todo el resultado**, no solo lo que está cargado.
+  void selectAll() {
+    state = state.copyWith(selection: state.selection.all(state.totalCount));
+  }
+
+  void clearSelection() {
+    state = state.copyWith(selection: state.selection.clear());
+  }
+
+  void invertSelection() {
+    state = state.copyWith(
+      selection: state.selection.withTotal(state.totalCount).invert(),
+    );
+  }
+
+  void moveCursor(int delta, {bool extend = false}) {
+    if (state.rowCount == 0) return;
+    final destino =
+        (state.selection.cursor + delta).clamp(0, state.rowCount - 1);
+    final s = state.selection.withTotal(state.totalCount);
+    state = state.copyWith(
+      selection: extend ? s.extendCursor(destino) : s.moveCursor(destino),
+    );
+    // Cargar por delante para que desplazarse con el teclado no parpadee.
+    rowAt(destino);
+  }
+
+  // ──────────────────────── Acciones sobre la selección ────────────────────────
+
+  /// Rutas completas de lo seleccionado. Es lo que consume el arrastre.
+  Future<List<String>> selectedPaths({int max = 10000}) async {
+    final indices = state.selection.withTotal(state.totalCount).resolve(max: max);
+    if (indices.isEmpty) return const [];
+    // Solo se pueden resolver filas dentro de la ventana que el motor tiene
+    // preparada; más allá hay que ampliarla antes.
+    final maximo = indices.reduce((a, b) => a > b ? a : b);
+    if (maximo >= state.readyCount) {
+      await _extendWindow(maximo + 1);
+    }
+    try {
+      return await ffi.pathsForRows(
+        generation: state.effectiveGeneration,
+        rows: Uint32List.fromList(indices),
+      );
+    } catch (e) {
+      debugPrint('No se pudieron resolver las rutas: $e');
+      return const [];
+    }
+  }
+
+  /// Ruta de una sola fila, para el arrastre de un elemento.
+  Future<String> pathOf(int index) async {
+    try {
+      return await ffi.fullPath(
+        generation: state.effectiveGeneration,
+        row: index,
+      );
+    } catch (_) {
+      return '';
+    }
+  }
+
+  Future<void> copySelectedPath() async {
+    final rutas = await selectedPaths(max: 5000);
+    if (rutas.isEmpty) return;
+    await Clipboard.setData(ClipboardData(text: rutas.join('\n')));
+  }
+
+  /// Solo el nombre de archivo, sin la carpeta.
+  Future<void> copySelectedName() async {
+    final rutas = await selectedPaths(max: 5000);
+    if (rutas.isEmpty) return;
+    final nombres = rutas.map((r) {
+      final i = r.lastIndexOf(RegExp(r'[\\/]'));
+      return i >= 0 ? r.substring(i + 1) : r;
+    });
+    await Clipboard.setData(ClipboardData(text: nombres.join('\n')));
+  }
+
+  Future<void> revealSelected() async {
+    final rutas = await selectedPaths(max: 1);
+    if (rutas.isEmpty) return;
+    try {
+      await ffi.revealPath(pathStr: rutas.first);
+    } catch (e) {
+      debugPrint('No se pudo mostrar la ubicación: $e');
+    }
+  }
+
+  /// Abre lo seleccionado. Una carpeta se abre **dentro** de la aplicación.
+  Future<void> openSelected() async {
+    final cursor = state.selection.cursor;
+    final fila = _cache.rowAt(cursor);
+    if (fila != null && fila.isDirectory) {
+      await openFolder(fila.fullPath);
+      return;
+    }
+    final rutas = await selectedPaths(max: 20);
+    for (final r in rutas) {
+      try {
+        await ffi.openPath(pathStr: r);
+      } catch (e) {
+        debugPrint('No se pudo abrir «$r»: $e');
+      }
+    }
+  }
+
+  Future<void> openSelectedWith() async {
+    final rutas = await selectedPaths(max: 1);
+    if (rutas.isEmpty) return;
+    try {
+      await ffi.openWith(pathStr: rutas.first);
+    } catch (e) {
+      debugPrint('No se pudo abrir el diálogo: $e');
+    }
+  }
+
+  Future<void> showPropertiesSelected() async {
+    final rutas = await selectedPaths(max: 1);
+    if (rutas.isEmpty) return;
+    try {
+      await ffi.showPropertiesPath(pathStr: rutas.first);
+    } catch (e) {
+      debugPrint('No se pudieron mostrar las propiedades: $e');
+    }
+  }
+
+  // ─────────────────────────── Filtros y orden ───────────────────────────
+
+  String _buildEffectiveQuery(String userQuery, String filter) {
+    var queryStr = userQuery;
+
+    if (state.isRegex && queryStr.isNotEmpty) {
+      queryStr = 'regex:"$queryStr"';
+    } else {
+      if (state.isCaseSensitive && queryStr.isNotEmpty) {
+        queryStr = 'case:"$queryStr"';
+      }
+      if (state.isPathMatch && queryStr.isNotEmpty) {
+        queryStr = 'ruta:"$queryStr"';
+      }
+    }
+
+    final prefix = switch (filter) {
+      'Audio' => 'tipo:audio ',
+      'Proyectos DJ' => 'tipo:dj ',
+      'Vídeo' => 'tipo:video ',
+      'Imagen' => 'tipo:imagen ',
+      'Documentos' => 'tipo:documentos ',
+      'Comprimidos' => 'tipo:comprimidos ',
+      'Aplicaciones' || 'Ejecutables' => 'tipo:apps ',
+      'Carpetas' => 'tipo:carpetas ',
+      _ => '',
+    };
+    return '$prefix$queryStr'.trim();
+  }
+
+  /// Carpeta a la que se acota la búsqueda, o cadena vacía para todo el equipo.
+  ///
+  /// El acotado no se mete dentro del texto de la consulta: viaja aparte hasta
+  /// el motor. Metido en el texto solo podría filtrar el índice base, y las
+  /// entradas de la capa de cambios —lo copiado en el último minuto— quedarían
+  /// fuera precisamente cuando más interesa verlas.
+  String get _ambitoEfectivo {
+    if (state.searchEverywhere) return '';
+    return state.searchScope;
   }
 
   void setFilter(String filter) {
     state = state.copyWith(activeFilter: filter);
-    searchFiles(state.query);
+    searchNow();
+  }
+
+  void toggleCaseSensitive() {
+    state = state.copyWith(isCaseSensitive: !state.isCaseSensitive);
+    searchNow();
+  }
+
+  void togglePathMatch() {
+    state = state.copyWith(isPathMatch: !state.isPathMatch);
+    searchNow();
+  }
+
+  void toggleRegex() {
+    state = state.copyWith(isRegex: !state.isRegex);
+    searchNow();
   }
 
   void setSort(int col) {
     final asc = state.sortCol == col ? !state.ascending : true;
     state = state.copyWith(sortCol: col, ascending: asc);
-    searchFiles(state.query);
+    _repeatCurrentView();
   }
 
-  Future<void> loadMoreRows() async {
-    if (state.isLoadingMore || !state.hasMore) return;
+  /// Cambia cómo se pintan los resultados (detalles / lista / compacta).
+  ///
+  /// Solo afecta a la vista; no hay que volver a consultar al motor.
+  void setResultView(ResultViewMode modo) {
+    if (state.viewMode == modo) return;
+    state = state.copyWith(viewMode: modo);
+  }
 
-    state = state.copyWith(isLoadingMore: true);
-    try {
-      final gen = state.effectiveGeneration;
-      final offset = state.visibleRows.length;
-      final batch = await ffi.rows(generation: gen, offset: offset, count: 200);
+  /// Construye el CSV del resultado actual.
+  ///
+  /// Lee por páginas del motor en lugar de recorrer una lista en memoria: la
+  /// vista ya no guarda las filas, y exportar cincuenta mil resultados no puede
+  /// exigir tenerlos todos cargados a la vez.
+  Future<String> buildCsv({int max = 50000}) async {
+    final sb = StringBuffer();
+    sb.writeln('Nombre,Ruta,Extensión,Tamaño,FechaModificación');
 
-      final moreRows = <FileRow>[];
-      for (var i = 0; i < batch.count; i++) {
-        moreRows.add(FileRow(
-          index: batch.offset + i,
-          name: batch.names[i],
-          path: batch.paths[i],
-          extension: batch.extensions[i],
-          size: batch.sizes[i].toInt(),
-          mtime: batch.mtimes[i],
-          flags: batch.flags[i],
-        ));
-      }
+    final cuantas = state.totalCount < max ? state.totalCount : max;
+    if (cuantas == 0) return sb.toString();
 
-      state = state.copyWith(
-        visibleRows: [...state.visibleRows, ...moreRows],
-        isLoadingMore: false,
+    if (cuantas > state.readyCount) {
+      await _extendWindow(cuantas);
+    }
+
+    const porTanda = 500;
+    for (var offset = 0; offset < cuantas; offset += porTanda) {
+      final cuantasAhora =
+          (cuantas - offset) < porTanda ? (cuantas - offset) : porTanda;
+      final batch = await ffi.rows(
+        generation: state.effectiveGeneration,
+        offset: offset,
+        count: cuantasAhora,
       );
-    } catch (_) {
-      state = state.copyWith(isLoadingMore: false);
-    }
-  }
-
-  void selectRow(int index) {
-    if (index >= 0 && index < state.visibleRows.length) {
-      state = state.copyWith(selectedIndex: index);
-    }
-  }
-
-  void selectNext() {
-    if (state.selectedIndex < state.visibleRows.length - 1) {
-      state = state.copyWith(selectedIndex: state.selectedIndex + 1);
-      // Carga proactiva si nos acercamos al final de la ventana
-      if (state.selectedIndex >= state.visibleRows.length - 30 && state.hasMore) {
-        loadMoreRows();
+      for (var i = 0; i < batch.count; i++) {
+        final nombre = _escapar(batch.names[i]);
+        final ruta = _escapar(batch.paths[i]);
+        final ext = _escapar(batch.extensions[i]);
+        final fecha = DateTime.fromMillisecondsSinceEpoch(batch.mtimes[i] * 1000)
+            .toIso8601String();
+        sb.writeln('"$nombre","$ruta","$ext",${batch.sizes[i]},"$fecha"');
       }
-    } else if (state.hasMore) {
-      loadMoreRows().then((_) {
-        if (state.selectedIndex < state.visibleRows.length - 1) {
-          state = state.copyWith(selectedIndex: state.selectedIndex + 1);
-        }
-      });
+      if (batch.count == 0) break;
     }
+    return sb.toString();
   }
 
-  void selectPrev() {
-    if (state.selectedIndex > 0) {
-      state = state.copyWith(selectedIndex: state.selectedIndex - 1);
-    }
-  }
+  /// Duplica las comillas: es como se escapa una comilla dentro de un campo CSV.
+  static String _escapar(String v) => v.replaceAll('"', '""');
 
-  Future<void> copySelectedPath() async {
-    if (state.visibleRows.isNotEmpty && state.selectedIndex < state.visibleRows.length) {
-      final item = state.visibleRows[state.selectedIndex];
-      await Clipboard.setData(ClipboardData(text: item.fullPath));
-    }
-  }
-
-  Future<void> revealSelected() async {
-    if (state.visibleRows.isNotEmpty && state.selectedIndex < state.visibleRows.length) {
+  /// Vuelve a consultar tras una operación de archivo.
+  Future<void> refreshAfterFileOperation() async {
+    // El indexador publica los cambios en su propio ritmo (0,5–2 s de calma
+    // antes de reescribir el índice). Preguntar una sola vez devolvería false y
+    // repetiríamos la vista contra un índice viejo: el archivo duplicado o el
+    // renombrado no aparecería hasta el sondeo pasivo de 1 s (o nunca, si el
+    // indexador va lento). Se reintenta brevemente hasta que la generación
+    // sube, y solo entonces se repite la consulta.
+    const total = Duration(milliseconds: 4000);
+    const paso = Duration(milliseconds: 300);
+    final limite = DateTime.now().add(total);
+    var cambiado = false;
+    do {
       try {
-        await ffi.revealInExplorer(
-          generation: state.effectiveGeneration,
-          row: state.selectedIndex,
-        );
+        cambiado = await ffi.reloadIfChanged();
       } catch (_) {}
-    }
+      if (cambiado) break;
+      await Future<void>.delayed(paso);
+    } while (DateTime.now().isBefore(limite));
+    await _repeatCurrentView();
+  }
+
+  /// Refresco manual o por F5/«Actualizar»: recarga el índice si cambió y
+  /// repite la consulta actual.
+  Future<void> refreshNow() async {
+    try {
+      await ffi.reloadIfChanged();
+    } catch (_) {}
+    await _repeatCurrentView();
   }
 }
 
