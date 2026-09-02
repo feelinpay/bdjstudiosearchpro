@@ -413,10 +413,10 @@ pub fn engine_status() -> EngineStatusFfi {
 /// en curso. Sin esto el cliente mapeaba el índice una sola vez al arrancar y no
 /// volvía a enterarse de nada.
 pub fn reload_if_changed() -> bool {
-    let path = match INDEX_PATH.lock().clone() {
-        Some(p) => p,
-        None => return false,
-    };
+    let path = INDEX_PATH
+        .lock()
+        .clone()
+        .unwrap_or_else(resolve_default_index_path);
 
     // Leer la cabecera cuesta microsegundos; se puede sondear sin coste.
     let Ok(mmap) = MmapIndex::open(&path) else {
@@ -431,6 +431,7 @@ pub fn reload_if_changed() -> bool {
     if base_cambio {
         INDEX_GENERATION.store(generation, Ordering::SeqCst);
         *MMAP_INDEX.lock() = Some(mmap);
+        *INDEX_PATH.lock() = Some(path.clone());
         *LAST_PROBLEM.lock() = None;
 
         // La pila de refinamiento y el último resultado guardan identificadores

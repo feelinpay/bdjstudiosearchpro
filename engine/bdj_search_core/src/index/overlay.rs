@@ -244,6 +244,15 @@ impl OverlayIndex {
         base: Option<&super::view::IndexView<'_>>,
         path: &str,
     ) -> Option<(String, String)> {
+        let mut normalized_path = path.to_string();
+        if normalized_path.len() == 2
+            && normalized_path.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false)
+            && normalized_path.ends_with(':')
+        {
+            normalized_path.push('\\');
+        }
+        let search_path = normalized_path.as_str();
+
         let mut mejor: Option<&str> = None;
         let mut tablas: Vec<&super::vol_table::VolumeTable> = vec![&self.builder.vol_table];
         if let Some(v) = base {
@@ -252,9 +261,9 @@ impl OverlayIndex {
         for tabla in tablas {
             for vol in &tabla.volumes {
                 let p = vol.mount_prefix.as_str();
-                if path.is_char_boundary(p.len())
-                    && path.len() >= p.len()
-                    && Self::prefix_matches(&path[..p.len()], p)
+                if search_path.is_char_boundary(p.len())
+                    && search_path.len() >= p.len()
+                    && Self::prefix_matches(&search_path[..p.len()], p)
                     && mejor.map(|m| p.len() > m.len()).unwrap_or(true)
                 {
                     mejor = Some(p);
@@ -262,7 +271,7 @@ impl OverlayIndex {
             }
         }
         let prefix = mejor?;
-        Some((prefix.to_string(), path[prefix.len()..].to_string()))
+        Some((prefix.to_string(), search_path[prefix.len()..].to_string()))
     }
 
     /// Raíz de un volumen: entrada sin padre cuyo volumen corresponde al prefijo.

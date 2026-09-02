@@ -480,20 +480,26 @@ class _Cabecera extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _celda('Nombre', 0, lista ? 4 : 4),
-          _celda('Ruta', 1, lista ? 3 : 3),
+          _celda('Nombre', 0, lista ? 5 : 5, padding: const EdgeInsets.only(right: 8, top: 4, bottom: 4)),
+          _celda('Ruta', 1, lista ? 4 : 4, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
           if (!lista) ...[
-            _celda('Tipo', 5, 1),
-            _celda('Ext', 2, 1),
-            _celda('Tamaño', 3, 1, alignRight: true),
-            _celda('Modificado', 4, 2),
+            _celda('Tipo', 5, 1, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
+            _celda('Ext', 2, 1, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
+            _celda('Tamaño', 3, 1, alignRight: true, padding: const EdgeInsets.only(left: 8, right: 16, top: 4, bottom: 4)),
+            _celda('Modificado', 4, 2, padding: const EdgeInsets.only(left: 8, top: 4, bottom: 4)),
           ],
         ],
       ),
     );
   }
 
-  Widget _celda(String etiqueta, int columna, int flex, {bool alignRight = false}) {
+  Widget _celda(
+    String etiqueta,
+    int columna,
+    int flex, {
+    bool alignRight = false,
+    EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+  }) {
     final ordenada = estado.sortCol == columna;
     final flecha = ordenada ? (estado.ascending ? ' ▲' : ' ▼') : '';
 
@@ -502,7 +508,7 @@ class _Cabecera extends StatelessWidget {
       child: InkWell(
         onTap: () => notifier.setSort(columna),
         child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 4),
+          padding: padding,
           child: Text(
             '$etiqueta$flecha',
             textAlign: alignRight ? TextAlign.right : TextAlign.left,
@@ -721,40 +727,46 @@ class _Fila extends StatelessWidget {
   List<Widget> _celdasDetalle(Color colorTexto, Color colorSecundario) {
     return [
       Expanded(
-        flex: 4,
-        child: Row(
-          children: [
-            _iconoFila(),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                fila.name,
-                overflow: TextOverflow.ellipsis,
-                style: _estiloNombre(colorTexto),
+        flex: 5,
+        child: Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Row(
+            children: [
+              _iconoFila(),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  fila.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: _estiloNombre(colorTexto),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-      _celda(fila.path, flex: 3, colorSecundario: colorSecundario),
-      _celda(fila.tipoLabel, flex: 1, colorSecundario: colorSecundario),
-      _celda(fila.extension, flex: 1, colorSecundario: colorSecundario),
+      _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
+      _celda(fila.tipoLabel, flex: 1, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
+      _celda(fila.extension, flex: 1, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
       Expanded(
         flex: 1,
-        child: Text(
-          fila.formattedSize,
-          textAlign: TextAlign.right,
-          style: TextStyle(
-            fontSize: 11,
-            fontFamily: 'monospace',
-            color: colorSecundario,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 8, right: 16),
+          child: Text(
+            fila.formattedSize,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              fontSize: 11,
+              fontFamily: 'monospace',
+              color: colorSecundario,
+            ),
           ),
         ),
       ),
       Expanded(
         flex: 2,
         child: Padding(
-          padding: const EdgeInsets.only(left: 12),
+          padding: const EdgeInsets.only(left: 8),
           child: Text(
             fila.formattedDate,
             style: TextStyle(fontSize: 11, color: colorSecundario),
@@ -768,22 +780,25 @@ class _Fila extends StatelessWidget {
   List<Widget> _celdasLista(Color colorTexto, Color colorSecundario) {
     return [
       Expanded(
-        flex: 4,
-        child: Row(
-          children: [
-            _iconoFila(),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                fila.name,
-                overflow: TextOverflow.ellipsis,
-                style: _estiloNombre(colorTexto),
+        flex: 5,
+        child: Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: Row(
+            children: [
+              _iconoFila(),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  fila.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: _estiloNombre(colorTexto),
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
-      _celda(fila.path, flex: 3, colorSecundario: colorSecundario),
+      _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
     ];
   }
 
@@ -812,13 +827,21 @@ class _Fila extends StatelessWidget {
     color: colorTexto,
   );
 
-  Widget _celda(String texto, {required int flex, required Color colorSecundario}) =>
+  Widget _celda(
+    String texto, {
+    required int flex,
+    required Color colorSecundario,
+    EdgeInsetsGeometry padding = const EdgeInsets.symmetric(horizontal: 8),
+  }) =>
       Expanded(
         flex: flex,
-        child: Text(
-          texto,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(fontSize: 11, color: colorSecundario),
+        child: Padding(
+          padding: padding,
+          child: Text(
+            texto,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 11, color: colorSecundario),
+          ),
         ),
       );
 }

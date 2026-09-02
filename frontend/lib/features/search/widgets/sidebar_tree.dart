@@ -298,10 +298,15 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
               ),
             ),
             ...recentFolders.take(5).map((path) {
-              final isSelected = searchState.browsePath == path;
-              final name = path
-                  .split(RegExp(r'[\\/]'))
-                  .lastWhere((s) => s.isNotEmpty, orElse: () => path);
+              final isSelected = searchState.browsePath == path ||
+                  (searchState.browsePath.startsWith(path) && path.endsWith('\\'));
+              final name = (path.endsWith(':\\') ||
+                      path.endsWith(':/') ||
+                      RegExp(r'^[a-zA-Z]:$').hasMatch(path))
+                  ? 'Disco local (${path.replaceAll('\\', '').replaceAll('/', '')})'
+                  : path
+                      .split(RegExp(r'[\\/]'))
+                      .lastWhere((s) => s.isNotEmpty, orElse: () => path);
               return _aceptaSuelta(
                 ListTile(
                   dense: true,

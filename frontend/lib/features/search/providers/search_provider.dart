@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -438,17 +439,27 @@ class SearchNotifier extends StateNotifier<SearchState> {
   // ───────────────────────────── Navegación ─────────────────────────────
 
   /// Abre una carpeta leyendo sus hijos **del índice**, sin tocar el disco.
-  Future<bool> openFolder(String path) => _runBrowse(path, pushHistory: true);
+  Future<bool> openFolder(String path) {
+    var p = path.trim();
+    if (Platform.isWindows && RegExp(r'^[a-zA-Z]:$').hasMatch(p)) {
+      p = '$p\\';
+    }
+    return _runBrowse(p, pushHistory: true);
+  }
 
   Future<bool> _runBrowse(String path, {required bool pushHistory}) async {
+    var cleanPath = path.trim();
+    if (Platform.isWindows && RegExp(r'^[a-zA-Z]:$').hasMatch(cleanPath)) {
+      cleanPath = '$cleanPath\\';
+    }
     final seq = ++_seq;
     state = state.copyWith(isSearching: true);
 
     try {
-      final gen = path.isEmpty
+      final gen = cleanPath.isEmpty
           ? await ffi.browseRoots(sortCol: state.sortCol, ascending: state.ascending)
           : await ffi.browsePath(
-              path: path,
+              path: cleanPath,
               sortCol: state.sortCol,
               ascending: state.ascending,
               limit: _initialLimit,
@@ -461,10 +472,10 @@ class SearchNotifier extends StateNotifier<SearchState> {
       if (pushHistory) {
         // Al navegar desde un punto intermedio del historial, lo que había
         // delante se descarta: es como se comporta cualquier navegador.
-        historial = [...historial.take(indice + 1), path];
+        historial = [...historial.take(indice + 1), cleanPath];
         indice = historial.length - 1;
-        if (path.isNotEmpty) {
-          ref?.read(recentFoldersProvider.notifier).add(path);
+        if (cleanPath.isNotEmpty) {
+          ref?.read(recentFoldersProvider.notifier).add(cleanPath);
         }
       }
 
@@ -718,6 +729,11 @@ class SearchNotifier extends StateNotifier<SearchState> {
       await ffi.revealPath(pathStr: rutas.first);
     } catch (e) {
       debugPrint('No se pudo mostrar la ubicación: $e');
+      final cambiado = await ffi.reloadIfChanged();
+      if (cambiado) {
+        await _readEngineStatus();
+        await _repeatCurrentView();
+      }
     }
   }
 
