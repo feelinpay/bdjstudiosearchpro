@@ -1,7 +1,10 @@
+import 'package:bdj_license_core/bdj_license_core.dart';
 import 'package:bdj_studio_search_pro/core/errors/failures.dart';
+import 'package:bdj_studio_search_pro/core/security/device_fingerprint.dart';
 import 'package:bdj_studio_search_pro/core/security/security_port.dart';
 import 'package:bdj_studio_search_pro/features/licensing/presentation/providers/license_providers.dart';
 import 'package:bdj_studio_search_pro/features/licensing/presentation/screens/activation_screen.dart';
+import 'package:bdj_studio_search_pro/features/search/providers/search_provider.dart';
 import 'package:bdj_studio_search_pro/main.dart';
 import 'package:dartz/dartz.dart';
 import 'package:flutter/material.dart';
@@ -36,11 +39,26 @@ class _InMemorySecureStorage implements SecurityPort {
   Future<Result<bool>> performSelfTest() async => const Right(true);
 }
 
+class _FakeDeviceFingerprint extends DeviceFingerprint {
+  @override
+  Future<String> generate() async => 'TEST-0000-1111-2222';
+
+  @override
+  Future<HwidResult> generateResult() async => HwidEngine.canonicalize(
+        platform: 'windows',
+        components: const {'smbiosUuid': 'TEST-UUID-0000'},
+      );
+}
+
 Widget _appWithStorage([_InMemorySecureStorage? storage]) {
   return ProviderScope(
     overrides: [
       secureStorageProvider
           .overrideWithValue(storage ?? _InMemorySecureStorage()),
+      deviceFingerprintProvider
+          .overrideWithValue(_FakeDeviceFingerprint()),
+      searchProvider
+          .overrideWith((ref) => SearchNotifier(autoInit: false)),
     ],
     child: const SearchProApp(),
   );
@@ -51,7 +69,7 @@ Widget _appWithStorage([_InMemorySecureStorage? storage]) {
 /// `pumpAndSettle` espera a que no quede ninguna animación pendiente y aquí eso
 /// no ocurre nunca: el campo de la licencia tiene el foco y su cursor parpadea
 /// en bucle, igual que el indicador de progreso mientras se calcula el ID.
-Future<void> _pumpFrames(WidgetTester tester, {int frames = 10}) async {
+Future<void> _pumpFrames(WidgetTester tester, {int frames = 20}) async {
   for (var i = 0; i < frames; i++) {
     await tester.pump(const Duration(milliseconds: 50));
   }

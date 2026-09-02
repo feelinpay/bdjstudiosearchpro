@@ -170,8 +170,10 @@ class SearchState {
 }
 
 class SearchNotifier extends StateNotifier<SearchState> {
-  SearchNotifier() : super(const SearchState()) {
-    _init();
+  SearchNotifier({bool autoInit = true}) : super(const SearchState()) {
+    if (autoInit) {
+      _init();
+    }
   }
 
   /// Cuánto se espera antes de consultar tras la última tecla.

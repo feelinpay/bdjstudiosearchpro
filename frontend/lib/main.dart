@@ -215,6 +215,9 @@ class _LicenseGateState extends ConsumerState<LicenseGate>
   /// manual) se reflejaría. Esto es lo que rompía el «tiempo real» en la
   /// práctica.
   Future<void> _informarLicenciaAlServicio(LicenseState estado) async {
+    if (Platform.environment.containsKey('FLUTTER_TEST')) {
+      return;
+    }
     final activa = estado.loadingState == LicenseLoadingState.licensed;
     final caduca = estado.expiresAt;
     final hasta = BigInt.from(

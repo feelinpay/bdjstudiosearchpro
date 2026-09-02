@@ -11,7 +11,7 @@ import 'file_row.dart';
 /// cuanto se pasa del tope. La memoria queda acotada por `maxPages` sin importar
 /// cuántos resultados haya: dos mil filas, siempre.
 class RowCache {
-  RowCache({this.pageSize = 200, int maxPages = 10}) : _maxPages = maxPages;
+  RowCache({this.pageSize = 200, this._maxPages = 10});
 
   final int pageSize;
 
