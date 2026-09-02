@@ -25,28 +25,34 @@ class TopMenuBar extends ConsumerWidget {
 
     return MenuBar(
       children: [
-SubmenuButton(
-              menuChildren: [
-                MenuItemButton(
-                  shortcut: const SingleActivator(LogicalKeyboardKey.f5),
-                  onPressed: () => searchNotifier.refreshNow(),
-                  child: const Text('Actualizar'),
-                ),
-                const Divider(),
-                MenuItemButton(
-                  shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true),
-                  onPressed: () => _exportCsv(context, searchNotifier),
-                  child: const Text('Exportar...'),
-                ),
-                const Divider(),
-                const MenuItemButton(
-                  shortcut: SingleActivator(LogicalKeyboardKey.keyQ, control: true),
-                  onPressed: terminarApp,
-                  child: Text('Salir'),
-                ),
-              ],
-              child: const Text('Archivo'),
+        SubmenuButton(
+          menuChildren: [
+            MenuItemButton(
+              shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true),
+              onPressed: () => Process.start(Platform.resolvedExecutable, []),
+              child: const Text('Nueva ventana'),
             ),
+            const Divider(),
+            MenuItemButton(
+              shortcut: const SingleActivator(LogicalKeyboardKey.f5),
+              onPressed: () => searchNotifier.refreshNow(),
+              child: const Text('Actualizar'),
+            ),
+            const Divider(),
+            MenuItemButton(
+              shortcut: const SingleActivator(LogicalKeyboardKey.keyS, control: true),
+              onPressed: () => _exportCsv(context, searchNotifier),
+              child: const Text('Exportar...'),
+            ),
+            const Divider(),
+            const MenuItemButton(
+              shortcut: SingleActivator(LogicalKeyboardKey.keyQ, control: true),
+              onPressed: terminarApp,
+              child: Text('Salir'),
+            ),
+          ],
+          child: const Text('Archivo'),
+        ),
         SubmenuButton(
           menuChildren: [
             MenuItemButton(

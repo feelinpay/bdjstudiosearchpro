@@ -362,19 +362,23 @@ class _RutaEditableState extends ConsumerState<_RutaEditable> {
   @override
   Widget build(BuildContext context) {
     if (!_editando) {
-      return Row(
-        children: [
-          Expanded(child: _MigaDePan(path: widget.path)),
-          IconButton(
-            icon: const Icon(Icons.edit_outlined, size: 15),
-            tooltip: 'Escribir la ruta exacta',
-            color: AppColors.textSecondary,
-            onPressed: _empezarEdicion,
-            splashRadius: 16,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          ),
-        ],
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: _empezarEdicion,
+        child: Row(
+          children: [
+            Expanded(child: _MigaDePan(path: widget.path)),
+            IconButton(
+              icon: const Icon(Icons.edit_outlined, size: 15),
+              tooltip: 'Escribir la ruta exacta (o clic en la barra)',
+              color: AppColors.textSecondary,
+              onPressed: _empezarEdicion,
+              splashRadius: 16,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+          ],
+        ),
       );
     }
 

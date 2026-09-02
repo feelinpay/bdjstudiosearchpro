@@ -677,6 +677,10 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
     }
 
     if (isControl) {
+      if (tecla == LogicalKeyboardKey.keyN) {
+        Process.start(Platform.resolvedExecutable, []);
+        return;
+      }
       if (tecla == LogicalKeyboardKey.keyA) {
         notifier.selectAll();
         return;

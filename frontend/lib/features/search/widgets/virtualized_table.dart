@@ -68,6 +68,7 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
                     fila: fila,
                     index: index,
                     viewMode: viewMode,
+                    mostrarRuta: estado.mode == ViewMode.search,
                     seleccionada: estado.selection.contains(index),
                     onTap: () => _alPulsar(index),
                     onDoubleTap: () {
@@ -471,6 +472,8 @@ class _Cabecera extends StatelessWidget {
     }
 
     final lista = viewMode == ResultViewMode.list;
+    final mostrarRuta = estado.mode == ViewMode.search;
+    final flexNombre = lista ? (mostrarRuta ? 5 : 9) : (mostrarRuta ? 5 : 8);
     return Container(
       height: 28,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -480,8 +483,9 @@ class _Cabecera extends StatelessWidget {
       ),
       child: Row(
         children: [
-          _celda('Nombre', 0, lista ? 5 : 5, padding: const EdgeInsets.only(right: 8, top: 4, bottom: 4)),
-          _celda('Ruta', 1, lista ? 4 : 4, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
+          _celda('Nombre', 0, flexNombre, padding: const EdgeInsets.only(right: 8, top: 4, bottom: 4)),
+          if (mostrarRuta)
+            _celda('Ruta', 1, 4, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
           if (!lista) ...[
             _celda('Tipo', 5, 1, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
             _celda('Ext', 2, 1, padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4)),
@@ -650,6 +654,7 @@ class _Fila extends StatelessWidget {
     required this.fila,
     required this.index,
     required this.viewMode,
+    required this.mostrarRuta,
     required this.seleccionada,
     required this.onTap,
     required this.onDoubleTap,
@@ -661,6 +666,7 @@ class _Fila extends StatelessWidget {
   final FileRow fila;
   final int index;
   final ResultViewMode viewMode;
+  final bool mostrarRuta;
   final bool seleccionada;
   final VoidCallback onTap;
   final VoidCallback onDoubleTap;
@@ -725,9 +731,10 @@ class _Fila extends StatelessWidget {
 
   /// Vista de detalles: la tabla completa.
   List<Widget> _celdasDetalle(Color colorTexto, Color colorSecundario) {
+    final flexNombre = mostrarRuta ? 5 : 8;
     return [
       Expanded(
-        flex: 5,
+        flex: flexNombre,
         child: Padding(
           padding: const EdgeInsets.only(right: 8),
           child: Row(
@@ -745,7 +752,8 @@ class _Fila extends StatelessWidget {
           ),
         ),
       ),
-      _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
+      if (mostrarRuta)
+        _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
       _celda(fila.tipoLabel, flex: 1, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
       _celda(fila.extension, flex: 1, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
       Expanded(
@@ -776,11 +784,12 @@ class _Fila extends StatelessWidget {
     ];
   }
 
-  /// Vista lista: icono, nombre y ruta.
+  /// Vista lista: icono, nombre y ruta (o solo nombre en modo carpeta).
   List<Widget> _celdasLista(Color colorTexto, Color colorSecundario) {
+    final flexNombre = mostrarRuta ? 5 : 9;
     return [
       Expanded(
-        flex: 5,
+        flex: flexNombre,
         child: Padding(
           padding: const EdgeInsets.only(right: 8),
           child: Row(
@@ -798,7 +807,8 @@ class _Fila extends StatelessWidget {
           ),
         ),
       ),
-      _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
+      if (mostrarRuta)
+        _celda(fila.path, flex: 4, colorSecundario: colorSecundario, padding: const EdgeInsets.symmetric(horizontal: 8)),
     ];
   }
 

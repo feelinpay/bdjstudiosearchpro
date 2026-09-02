@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
@@ -212,9 +213,47 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
         child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Encabezado de Acceso Rápido
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: Text(
+              'ACCESO RÁPIDO',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: AppColors.textSecondary,
+              ),
+            ),
+          ),
+          ..._obtenerAccesosRapidos().map((item) {
+            final isSelected = searchState.browsePath == item.ruta ||
+                (searchState.browsePath.startsWith(item.ruta) &&
+                    item.ruta.endsWith(Platform.pathSeparator));
+            return _aceptaSuelta(
+              ListTile(
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                leading: Icon(item.icono, size: 16, color: item.color),
+                title: Text(
+                  item.nombre,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                  ),
+                ),
+                onTap: () => notifier.openFolder(item.ruta),
+              ),
+              item.ruta,
+            );
+          }),
+          const Divider(height: 16, color: AppColors.border),
+
           // Encabezado de Marcadores
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
@@ -438,4 +477,57 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
       ),
     ];
   }
+
+  List<_AccesoRapidoItem> _obtenerAccesosRapidos() {
+    final env = Platform.environment;
+    final home = Platform.isWindows ? env['USERPROFILE'] : env['HOME'];
+    if (home == null || home.isEmpty) return const [];
+    final sep = Platform.pathSeparator;
+    return [
+      _AccesoRapidoItem(
+        nombre: 'Descargas',
+        icono: Icons.download_rounded,
+        color: const Color(0xFF29B6F6),
+        ruta: '$home${sep}Downloads',
+      ),
+      _AccesoRapidoItem(
+        nombre: 'Escritorio',
+        icono: Icons.desktop_windows_rounded,
+        color: const Color(0xFF66BB6A),
+        ruta: '$home${sep}Desktop',
+      ),
+      _AccesoRapidoItem(
+        nombre: 'Música',
+        icono: Icons.library_music_rounded,
+        color: const Color(0xFFFFA726),
+        ruta: '$home${sep}Music',
+      ),
+      _AccesoRapidoItem(
+        nombre: 'Documentos',
+        icono: Icons.description_rounded,
+        color: const Color(0xFFAB47BC),
+        ruta: '$home${sep}Documents',
+      ),
+      _AccesoRapidoItem(
+        nombre: 'Vídeos',
+        icono: Icons.video_library_rounded,
+        color: const Color(0xFFEC407A),
+        ruta: '$home$sep${Platform.isWindows ? "Videos" : "Movies"}',
+      ),
+    ];
+  }
+}
+
+class _AccesoRapidoItem {
+  const _AccesoRapidoItem({
+    required this.nombre,
+    required this.icono,
+    required this.color,
+    required this.ruta,
+  });
+
+  final String nombre;
+  final IconData icono;
+  final Color color;
+  final String ruta;
 }

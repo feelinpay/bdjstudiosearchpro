@@ -63,6 +63,7 @@ impl Clave {
 
 struct Candidata {
     id: u32,
+    es_dir: bool,
     clave: Clave,
     /// Desempate estable: a igualdad de clave, orden alfabético por nombre.
     nombre: String,
@@ -195,7 +196,7 @@ pub fn search_merged(
             continue;
         }
         let (clave, nombre) = clave_de(base, idx, sort_col, || base.resolve_full_path(idx));
-        candidatas.push(Candidata { id, clave, nombre });
+        candidatas.push(Candidata { id, es_dir: base.is_dir(idx), clave, nombre });
     }
 
     // --- Candidatas de la capa ---
@@ -263,6 +264,7 @@ pub fn search_merged(
             });
             candidatas.push(Candidata {
                 id: unificado,
+                es_dir: vc.is_dir(idx),
                 clave,
                 nombre,
             });
@@ -271,6 +273,9 @@ pub fn search_merged(
 
     // --- Fusión ---
     candidatas.sort_by(|a, b| {
+        if a.es_dir != b.es_dir {
+            return if a.es_dir { Ordering::Less } else { Ordering::Greater };
+        }
         let orden = a.clave.cmp_con(&b.clave);
         if orden == Ordering::Equal {
             a.nombre.cmp(&b.nombre).then(a.id.cmp(&b.id))
@@ -339,7 +344,7 @@ pub fn rank_merged(
                 continue;
             }
             let (clave, nombre) = clave_de(base, idx, sort_col, || base.resolve_full_path(idx));
-            candidatas.push(Candidata { id, clave, nombre });
+            candidatas.push(Candidata { id, es_dir: base.is_dir(idx), clave, nombre });
         } else if let Some(vc) = vista_capa.as_ref() {
             let idx = (id - base_count) as usize;
             if idx >= vc.entry_count() {
@@ -361,11 +366,14 @@ pub fn rank_merged(
                 }
                 None => vc.get_name(idx).unwrap_or("").to_string(),
             });
-            candidatas.push(Candidata { id, clave, nombre });
+            candidatas.push(Candidata { id, es_dir: vc.is_dir(idx), clave, nombre });
         }
     }
 
     candidatas.sort_by(|a, b| {
+        if a.es_dir != b.es_dir {
+            return if a.es_dir { Ordering::Less } else { Ordering::Greater };
+        }
         let orden = a.clave.cmp_con(&b.clave);
         if orden == Ordering::Equal {
             a.nombre.cmp(&b.nombre).then(a.id.cmp(&b.id))
