@@ -30,15 +30,47 @@ import 'features/search/widgets/sidebar_tree.dart';
 import 'features/search/widgets/preview_pane.dart';
 import 'core/ffi/api.dart' as ffi;
 
+String? _findProjectRoot() {
+  var dir = Directory.current;
+  for (var i = 0; i < 5; i++) {
+    final cargoToml = File('${dir.path}${Platform.pathSeparator}engine${Platform.pathSeparator}Cargo.toml');
+    if (cargoToml.existsSync()) {
+      return dir.path;
+    }
+    final parent = dir.parent;
+    if (parent.path == dir.path) break;
+    dir = parent;
+  }
+  return null;
+}
+
+Future<bool> _compileNativeSync(String root) async {
+  try {
+    debugPrint('RustLib: ejecutando auto-sanación nativa en $root...');
+    final result = Platform.isWindows
+        ? await Process.run('powershell', [
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            '$root\\tools\\build_native.ps1',
+            '-SkipCodegen',
+          ])
+        : await Process.run('bash', ['$root/tools/build_macos.sh']);
+    return result.exitCode == 0;
+  } catch (e) {
+    debugPrint('RustLib: error durante compilación nativa: $e');
+    return false;
+  }
+}
+
 Future<void> _initRustLib() async {
-  ExternalLibrary? externalLib;
   final cwd = Directory.current.path;
+  final exeDir = File(Platform.resolvedExecutable).parent.path;
+
+  // 1. Recolectar todas las rutas candidatas
+  final candidatePaths = <String>[];
   if (Platform.isWindows) {
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    final candidates = [
-      '$exeDir\\bdj_search_ffi.dll',
-      '$cwd\\build\\windows\\x64\\runner\\Debug\\bdj_search_ffi.dll',
-      '$cwd\\build\\windows\\x64\\runner\\Release\\bdj_search_ffi.dll',
+    candidatePaths.addAll([
       '$cwd\\..\\engine\\target\\release\\bdj_search_ffi.dll',
       '$cwd\\..\\engine\\target\\debug\\bdj_search_ffi.dll',
       '$cwd\\engine\\target\\release\\bdj_search_ffi.dll',
@@ -47,59 +79,117 @@ Future<void> _initRustLib() async {
       '..\\engine\\target\\debug\\bdj_search_ffi.dll',
       'engine\\target\\release\\bdj_search_ffi.dll',
       'engine\\target\\debug\\bdj_search_ffi.dll',
-    ];
-    for (final c in candidates) {
-      final f = File(c);
-      if (f.existsSync()) {
-        externalLib = ExternalLibrary.open(f.path);
-        debugPrint('RustLib: cargada biblioteca nativa desde ${f.path}');
-        break;
-      }
-    }
+      '$exeDir\\bdj_search_ffi.dll',
+      '$cwd\\build\\windows\\x64\\runner\\Release\\bdj_search_ffi.dll',
+      '$cwd\\build\\windows\\x64\\runner\\Debug\\bdj_search_ffi.dll',
+    ]);
   } else if (Platform.isMacOS) {
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    final candidates = [
-      '$exeDir/libbdj_search_ffi.dylib',
-      '$exeDir/../Frameworks/libbdj_search_ffi.dylib',
-      '$cwd/build/macos/Build/Products/Debug/libbdj_search_ffi.dylib',
+    candidatePaths.addAll([
       '$cwd/../engine/target/release/libbdj_search_ffi.dylib',
       '$cwd/../engine/target/debug/libbdj_search_ffi.dylib',
       '$cwd/engine/target/release/libbdj_search_ffi.dylib',
       '../engine/target/release/libbdj_search_ffi.dylib',
       '../engine/target/debug/libbdj_search_ffi.dylib',
-    ];
-    for (final c in candidates) {
-      final f = File(c);
-      if (f.existsSync()) {
-        externalLib = ExternalLibrary.open(f.path);
-        debugPrint('RustLib: cargada biblioteca nativa desde ${f.path}');
-        break;
+      '$exeDir/libbdj_search_ffi.dylib',
+      '$exeDir/../Frameworks/libbdj_search_ffi.dylib',
+      '$cwd/build/macos/Build/Products/Release/libbdj_search_ffi.dylib',
+      '$cwd/build/macos/Build/Products/Debug/libbdj_search_ffi.dylib',
+    ]);
+  }
+
+  // Filtrar solo los archivos existentes en disco
+  final existingFiles = candidatePaths
+      .map((p) => File(p))
+      .where((f) => f.existsSync())
+      .toList();
+
+  // Ordenar por fecha de modificación descendente (el binario más reciente primero)
+  existingFiles.sort((a, b) {
+    try {
+      return b.lastModifiedSync().compareTo(a.lastModifiedSync());
+    } catch (_) {
+      return 0;
+    }
+  });
+
+  // Auto-sincronización a la carpeta del ejecutable si hay un binario más nuevo
+  if (existingFiles.isNotEmpty) {
+    final newest = existingFiles.first;
+    final targetInExe = File(Platform.isWindows
+        ? '$exeDir\\bdj_search_ffi.dll'
+        : '$exeDir/libbdj_search_ffi.dylib');
+    try {
+      if (newest.path != targetInExe.path &&
+          (!targetInExe.existsSync() || newest.lastModifiedSync().isAfter(targetInExe.lastModifiedSync()))) {
+        newest.copySync(targetInExe.path);
+        debugPrint('RustLib: copiado binario más reciente a ${targetInExe.path}');
+      }
+    } catch (e) {
+      debugPrint('RustLib: nota de sincronización: $e');
+    }
+  }
+
+  // 2. Probar candidatos en orden de novedad hasta que uno valide el hash
+  Object? lastError;
+  bool initialized = false;
+
+  for (final file in existingFiles) {
+    try {
+      final lib = ExternalLibrary.open(file.path);
+      await RustLib.init(externalLibrary: lib);
+      debugPrint('RustLib: inicializado con éxito desde ${file.path}');
+      initialized = true;
+      break;
+    } catch (e) {
+      lastError = e;
+      debugPrint('RustLib: descartado candidato ${file.path} ($e)');
+    }
+  }
+
+  // 3. Si ninguno coincidió y estamos en entorno de desarrollo, auto-sanar compilando
+  if (!initialized) {
+    debugPrint('RustLib: ningún binario coincide con el hash. Intentando auto-sanación...');
+    final rootDir = _findProjectRoot();
+    if (rootDir != null) {
+      final compiled = await _compileNativeSync(rootDir);
+      if (compiled) {
+        final releaseDll = File(Platform.isWindows
+            ? '$rootDir\\engine\\target\\release\\bdj_search_ffi.dll'
+            : '$rootDir/engine/target/release/libbdj_search_ffi.dylib');
+        if (releaseDll.existsSync()) {
+          try {
+            final lib = ExternalLibrary.open(releaseDll.path);
+            await RustLib.init(externalLibrary: lib);
+            debugPrint('RustLib: inicializado tras auto-sanación desde ${releaseDll.path}');
+            initialized = true;
+          } catch (e) {
+            lastError = e;
+          }
+        }
       }
     }
   }
 
-  if (externalLib == null) {
-    debugPrint('RustLib: no se encontró la biblioteca nativa en ninguna '
-        'ubicación conocida; se usará el cargador por defecto.');
-  }
-
-  // Clave: no tragarnos el error. Si la inicialización falla, el puente FFI
-  // queda en un estado roto y cualquier llamada posterior (p. ej. informar de
-  // la licencia al servicio) revienta con un confuso
-  // «flutter_rust_bridge has not been initialized». Mejor fallar aquí, en el
-  // arranque, con el motivo real, que arrancar la app a medias.
-  try {
-    await RustLib.init(externalLibrary: externalLib);
-  } catch (e) {
-    debugPrint('RustLib: error al inicializar el puente FFI: $e');
-    rethrow;
+  if (!initialized) {
+    throw StateError('No se pudo inicializar la biblioteca nativa: $lastError');
   }
   debugPrint('RustLib: inicializado correctamente.');
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await _initRustLib();
+
+  try {
+    await _initRustLib();
+  } catch (e) {
+    debugPrint('RustLib: error al inicializar el puente FFI: $e');
+    runApp(MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: _FfiRecoveryScreen(error: e.toString()),
+    ));
+    return;
+  }
+
   // Un solo indexador, y el recien compilado (mata los zombies previos del
   // arbol de build antes de lanzar el suyo). Se lanza en segundo plano: no
   // bloquea la primera ventana.
@@ -116,6 +206,119 @@ Future<void> main() async {
   }
 
   runApp(const ProviderScope(child: SearchProApp()));
+}
+
+/// Pantalla de contingencia y recuperación visual si el motor FFI requiere actualización.
+class _FfiRecoveryScreen extends StatefulWidget {
+  final String error;
+  const _FfiRecoveryScreen({required this.error});
+
+  @override
+  State<_FfiRecoveryScreen> createState() => _FfiRecoveryScreenState();
+}
+
+class _FfiRecoveryScreenState extends State<_FfiRecoveryScreen> {
+  bool _sincronizando = false;
+  String? _mensaje;
+
+  Future<void> _reintentar() async {
+    setState(() {
+      _sincronizando = true;
+      _mensaje = 'Sincronizando biblioteca nativa con el motor Rust...';
+    });
+
+    final root = _findProjectRoot();
+    if (root != null) {
+      await _compileNativeSync(root);
+    }
+
+    try {
+      await _initRustLib();
+      if (!mounted) return;
+      unawaited(garantizarIndexador());
+      if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+        try {
+          await windowManager.ensureInitialized();
+          await windowManager.setTitle('BDJ Studio Search Pro');
+          await hotKeyManager.unregisterAll();
+        } catch (_) {}
+      }
+      runApp(const ProviderScope(child: SearchProApp()));
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _sincronizando = false;
+          _mensaje = 'No se pudo sincronizar automáticamente: $e';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppColors.surface,
+      body: Center(
+        child: Container(
+          width: 480,
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.border),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withAlpha(15),
+                blurRadius: 16,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.sync_problem_rounded, size: 48, color: AppColors.primary),
+              const SizedBox(height: 16),
+              const Text(
+                'Sincronización de Componentes Requerida',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                _mensaje ??
+                    'La interfaz se ha actualizado y requiere sincronizar la biblioteca binaria de Rust con el código de Dart.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 13,
+                  color: AppColors.textSecondary,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 24),
+              if (_sincronizando)
+                const CircularProgressIndicator(color: AppColors.primary, strokeWidth: 2.5)
+              else
+                ElevatedButton.icon(
+                  onPressed: _reintentar,
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: const Text('Sincronizar y Abrir Aplicación'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class SearchProApp extends StatelessWidget {
