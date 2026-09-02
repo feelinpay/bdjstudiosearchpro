@@ -59,14 +59,16 @@ pub fn run(shared: &OpShared, req: OpRequest) {
     shared.set_totals(plan.total_items, plan.total_bytes);
     shared.set_state(OpState::Running);
 
-let result = match req.kind {
+    let result = match req.kind {
         OpKind::CreateFolder => create_folder(shared, &req),
         OpKind::CreateFile => create_file(shared, &req),
         OpKind::Rename => rename(shared, &req),
-OpKind::Trash => trash(shared, &req),
+        OpKind::Trash => trash(shared, &req),
         OpKind::Restore => restore(shared, &req),
         OpKind::DeletePermanently => delete_permanently(shared, &req),
         OpKind::Copy | OpKind::Duplicate | OpKind::Move => transfer(shared, &req, &plan),
+        OpKind::CompressZip => compress_zip(shared, &req),
+        OpKind::ExtractZip => extract_zip(shared, &req),
     };
 
     match result {
@@ -119,6 +121,40 @@ OpKind::Copy | OpKind::Duplicate | OpKind::Move => {
             total_items: req.sources.len() as u64,
             total_bytes: 0,
         }),
+        OpKind::CompressZip => {
+            let mut items = 0u64;
+            let mut bytes = 0u64;
+            for src in &req.sources {
+                if shared.is_cancelled() {
+                    break;
+                }
+                count_tree(Path::new(src), &mut items, &mut bytes);
+            }
+            Ok(Plan {
+                total_items: items,
+                total_bytes: bytes,
+            })
+        }
+        OpKind::ExtractZip => {
+            let mut items = 0u64;
+            let mut bytes = 0u64;
+            for src in &req.sources {
+                if let Ok(file) = std::fs::File::open(src) {
+                    if let Ok(mut archive) = zip::ZipArchive::new(file) {
+                        items += archive.len() as u64;
+                        for i in 0..archive.len() {
+                            if let Ok(f) = archive.by_index(i) {
+                                bytes += f.size();
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Plan {
+                total_items: items,
+                total_bytes: bytes,
+            })
+        }
     }
 }
 
@@ -850,6 +886,169 @@ Action::Restored { path } => {
         }
     }
     out
+}
+
+fn compress_zip(shared: &OpShared, req: &OpRequest) -> Result<(), String> {
+    shared.mark_not_undoable();
+    let dest_buf = req
+        .destination
+        .as_ref()
+        .ok_or_else(|| "Falta la ruta destino del archivo zip".to_string())?;
+    let dest_path = dest_buf.as_path();
+
+    let file = fs::File::create(dest_path)
+        .map_err(|e| format!("No se pudo crear el archivo zip: {e}"))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut buf = vec![0u8; chunk()];
+
+    for src_buf in &req.sources {
+        if shared.is_cancelled() {
+            break;
+        }
+        let src = src_buf.as_path();
+        if !src.exists() {
+            continue;
+        }
+
+        let base_dir = src.parent().unwrap_or_else(|| Path::new(""));
+
+        let mut stack = vec![src.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            if shared.is_cancelled() {
+                break;
+            }
+
+            let rel_name = current
+                .strip_prefix(base_dir)
+                .unwrap_or(&current)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            if current.is_dir() {
+                let name = if rel_name.ends_with('/') {
+                    rel_name
+                } else {
+                    format!("{}/", rel_name)
+                };
+                let _ = zip.add_directory(&name, options);
+                if let Ok(entries) = fs::read_dir(&current) {
+                    for entry in entries.flatten() {
+                        stack.push(entry.path());
+                    }
+                }
+            } else {
+                if let Ok(mut f) = fs::File::open(&current) {
+                    if zip.start_file(&rel_name, options).is_ok() {
+                        loop {
+                            if shared.is_cancelled() {
+                                break;
+                            }
+                            match f.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    if zip.write_all(&buf[..n]).is_err() {
+                                        break;
+                                    }
+                                    shared.advance_bytes(n as u64);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                }
+                shared.advance_item(&current);
+            }
+        }
+    }
+
+    zip.finish().map_err(|e| format!("Error al cerrar el archivo zip: {e}"))?;
+
+    shared.notify(PathChange::Created {
+        path: dest_path.to_string_lossy().to_string(),
+        is_dir: false,
+    });
+
+    Ok(())
+}
+
+fn extract_zip(shared: &OpShared, req: &OpRequest) -> Result<(), String> {
+    shared.mark_not_undoable();
+    let dest_buf = req
+        .destination
+        .as_ref()
+        .ok_or_else(|| "Falta la carpeta destino para descomprimir".to_string())?;
+    let dest_path = dest_buf.as_path();
+    if !dest_path.exists() {
+        fs::create_dir_all(dest_path)
+            .map_err(|e| format!("No se pudo crear el directorio de destino: {e}"))?;
+    }
+
+    let mut buf = vec![0u8; chunk()];
+
+    for src_buf in &req.sources {
+        if shared.is_cancelled() {
+            break;
+        }
+        let src = src_buf.as_path();
+        let file = fs::File::open(src)
+            .map_err(|e| format!("No se pudo abrir el archivo zip {}: {e}", src.display()))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("El archivo {} no es un ZIP válido: {e}", src.display()))?;
+
+        for i in 0..archive.len() {
+            if shared.is_cancelled() {
+                break;
+            }
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let outpath = match entry.enclosed_name() {
+                Some(p) => dest_path.join(p),
+                None => continue,
+            };
+
+            if entry.is_dir() {
+                let _ = fs::create_dir_all(&outpath);
+                shared.notify(PathChange::Created {
+                    path: outpath.to_string_lossy().to_string(),
+                    is_dir: true,
+                });
+            } else {
+                if let Some(parent) = outpath.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if let Ok(mut outfile) = fs::File::create(&outpath) {
+                    loop {
+                        if shared.is_cancelled() {
+                            break;
+                        }
+                        match entry.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if outfile.write_all(&buf[..n]).is_err() {
+                                    break;
+                                }
+                                shared.advance_bytes(n as u64);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                shared.advance_item(&outpath);
+                shared.notify(PathChange::Created {
+                    path: outpath.to_string_lossy().to_string(),
+                    is_dir: false,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

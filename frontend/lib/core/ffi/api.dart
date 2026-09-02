@@ -236,6 +236,22 @@ Future<BigInt> fsopRestore({required List<String> paths}) =>
 Future<BigInt> fsopDeletePermanently({required List<String> sources}) =>
     RustLib.instance.api.crateApiFsopDeletePermanently(sources: sources);
 
+Future<BigInt> fsopCompressZip({
+  required List<String> sources,
+  required String destination,
+}) => RustLib.instance.api.crateApiFsopCompressZip(
+  sources: sources,
+  destination: destination,
+);
+
+Future<BigInt> fsopExtractZip({
+  required List<String> sources,
+  required String destination,
+}) => RustLib.instance.api.crateApiFsopExtractZip(
+  sources: sources,
+  destination: destination,
+);
+
 /// Estado de todas las operaciones vivas.
 ///
 /// La interfaz lo consulta unas pocas veces por segundo: los contadores son

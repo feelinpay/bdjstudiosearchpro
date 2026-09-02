@@ -914,4 +914,33 @@ mod tests {
         assert_eq!(p.state, OpState::Failed);
         assert!(!p.errors.is_empty(), "debe explicarse que no se toca la raíz");
     }
+
+    #[test]
+    fn comprimir_y_descomprimir_un_archivo_zip() {
+        let dir = tempdir().unwrap();
+        let origen = dir.path().join("Musica");
+        escribir(&origen.join("track1.wav"), b"audio-data-1");
+        escribir(&origen.join("sub/track2.wav"), b"audio-data-2");
+
+        let zip_dest = dir.path().join("backup.zip");
+        let m = FileOpManager::new();
+
+        // 1. Comprimir
+        let req_zip = OpRequest::new(OpKind::CompressZip, vec![origen.clone()])
+            .with_destination(zip_dest.clone());
+        let id = m.submit(req_zip);
+        let p = m.wait_for(id, ESPERA).unwrap();
+        assert_eq!(p.state, OpState::Done, "errores: {:?}", p.errors);
+        assert!(zip_dest.exists());
+        assert!(p.done_bytes > 0);
+
+        // 2. Descomprimir en una carpeta nueva
+        let extract_dir = dir.path().join("Extraido");
+        let req_unzip = OpRequest::new(OpKind::ExtractZip, vec![zip_dest.clone()])
+            .with_destination(extract_dir.clone());
+        let id2 = m.submit(req_unzip);
+        let p2 = m.wait_for(id2, ESPERA).unwrap();
+        assert_eq!(p2.state, OpState::Done, "errores: {:?}", p2.errors);
+        assert!(extract_dir.exists());
+    }
 }

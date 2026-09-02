@@ -268,6 +268,28 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
     return id;
   }
 
+  /// Comprime una lista de rutas a un archivo .zip en `destinoZip`.
+  Future<BigInt> compressZip(List<String> origenes, String destinoZip) async {
+    if (origenes.isEmpty || destinoZip.isEmpty) return BigInt.zero;
+    final id = await ffi.fsopCompressZip(
+      sources: origenes,
+      destination: destinoZip,
+    );
+    _ensurePolling();
+    return id;
+  }
+
+  /// Descomprime un archivo .zip en la carpeta `destinoCarpeta`.
+  Future<BigInt> extractZip(String rutaZip, String destinoCarpeta) async {
+    if (rutaZip.isEmpty || destinoCarpeta.isEmpty) return BigInt.zero;
+    final id = await ffi.fsopExtractZip(
+      sources: [rutaZip],
+      destination: destinoCarpeta,
+    );
+    _ensurePolling();
+    return id;
+  }
+
   Future<void> cancel(BigInt id) async {
     await ffi.fsopCancel(opId: id);
   }

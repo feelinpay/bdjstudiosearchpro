@@ -20,6 +20,10 @@ pub enum OpKind {
     Restore,
     /// Borrar del disco sin pasar por la papelera. **No se puede deshacer.**
     DeletePermanently,
+    /// Comprimir uno o varios archivos/carpetas en un archivo .zip.
+    CompressZip,
+    /// Descomprimir un archivo .zip en la carpeta de destino.
+    ExtractZip,
 }
 
 impl OpKind {
@@ -29,7 +33,13 @@ impl OpKind {
     pub fn can_conflict(self) -> bool {
         matches!(
             self,
-            OpKind::CreateFolder | OpKind::CreateFile | OpKind::Rename | OpKind::Copy | OpKind::Move
+            OpKind::CreateFolder
+                | OpKind::CreateFile
+                | OpKind::Rename
+                | OpKind::Copy
+                | OpKind::Move
+                | OpKind::CompressZip
+                | OpKind::ExtractZip
         )
     }
 }

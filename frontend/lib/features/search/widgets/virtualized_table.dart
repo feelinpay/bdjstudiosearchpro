@@ -208,6 +208,10 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         _item('duplicate', 'Duplicar'),
         if (!varios) _item('rename', 'Cambiar nombre'),
         const PopupMenuDivider(),
+        _item('zip', 'Comprimir a archivo ZIP'),
+        if (notifier.rowAt(index)?.fullPath.toLowerCase().endsWith('.zip') == true)
+          _item('unzip', 'Descomprimir aquí'),
+        const PopupMenuDivider(),
         _item('reveal', 'Mostrar la ubicación'),
         _item('copypath', varios ? 'Copiar las rutas' : 'Copiar la ruta'),
         _item('copyname', varios ? 'Copiar los nombres' : 'Copiar el nombre'),
@@ -248,6 +252,32 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         await confirmarEnviarALaPapelera(context, ops, estado.selection.count);
       case 'deleteforever':
         await eliminarPermanentemente(context, ops, estado.selection.count);
+      case 'zip':
+        final rutas = await notifier.selectedPaths(max: 5000);
+        if (rutas.isNotEmpty) {
+          final primero = rutas.first;
+          final baseDir = primero.contains(RegExp(r'[\\/]'))
+              ? primero.substring(0, primero.lastIndexOf(RegExp(r'[\\/]')))
+              : '';
+          final sep = primero.contains('\\') ? '\\' : '/';
+          final nombreBase = primero.split(RegExp(r'[\\/]')).last;
+          final sinExt = nombreBase.contains('.')
+              ? nombreBase.substring(0, nombreBase.lastIndexOf('.'))
+              : nombreBase;
+          final nombreZip = rutas.length == 1
+              ? '$sinExt.zip'
+              : 'archivo_comprimido.zip';
+          final destino = baseDir.isEmpty ? nombreZip : '$baseDir$sep$nombreZip';
+          await ops.compressZip(rutas, destino);
+        }
+      case 'unzip':
+        final rutas = await notifier.selectedPaths(max: 10);
+        for (final r in rutas) {
+          if (r.toLowerCase().endsWith('.zip')) {
+            final carpetaDestino = r.substring(0, r.length - 4);
+            await ops.extractZip(r, carpetaDestino);
+          }
+        }
     }
   }
 

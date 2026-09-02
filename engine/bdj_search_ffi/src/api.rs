@@ -1063,6 +1063,8 @@ fn kind_code(kind: OpKind) -> u8 {
         OpKind::Restore => 6,
         OpKind::DeletePermanently => 7,
         OpKind::CreateFile => 8,
+        OpKind::CompressZip => 9,
+        OpKind::ExtractZip => 10,
     }
 }
 
@@ -1140,6 +1142,20 @@ pub fn fsop_restore(paths: Vec<String>) -> u64 {
 /// confirmación explícita.
 pub fn fsop_delete_permanently(sources: Vec<String>) -> u64 {
     FSOPS.submit(OpRequest::new(OpKind::DeletePermanently, to_paths(sources)))
+}
+
+pub fn fsop_compress_zip(sources: Vec<String>, destination: String) -> u64 {
+    FSOPS.submit(
+        OpRequest::new(OpKind::CompressZip, to_paths(sources))
+            .with_destination(PathBuf::from(destination)),
+    )
+}
+
+pub fn fsop_extract_zip(sources: Vec<String>, destination: String) -> u64 {
+    FSOPS.submit(
+        OpRequest::new(OpKind::ExtractZip, to_paths(sources))
+            .with_destination(PathBuf::from(destination)),
+    )
 }
 
 fn to_ffi(p: bdj_search_fsops::OpProgress) -> FileOpFfi {

@@ -324,9 +324,12 @@ class _Operacion extends StatelessWidget {
       3 => 'Moviendo',
       4 => 'Duplicando',
       5 => 'Enviando a la papelera',
+      6 => 'Restaurando desde la papelera',
       7 => 'Eliminando permanentemente',
       8 => 'Creando archivo',
-      _ => 'Restaurando desde la papelera',
+      9 => 'Comprimiendo ZIP',
+      10 => 'Descomprimiendo ZIP',
+      _ => 'Procesando archivo',
     };
     final n = op.totalItems.toInt();
     return n > 1 ? '$verbo $n elementos' : verbo;
