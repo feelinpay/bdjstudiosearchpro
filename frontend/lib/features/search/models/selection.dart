@@ -46,6 +46,13 @@ class Selection {
   bool get isEmpty => count == 0;
   bool get isNotEmpty => count > 0;
 
+  int? get firstIndex {
+    if (isEmpty) return null;
+    if (!inverted && indices.isNotEmpty) return indices.first;
+    if (cursor < total) return cursor;
+    return 0;
+  }
+
   Selection withTotal(int newTotal) => _copy(total: newTotal);
 
   /// Una sola fila, que además pasa a ser el ancla.

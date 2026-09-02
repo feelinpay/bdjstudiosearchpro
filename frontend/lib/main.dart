@@ -27,6 +27,7 @@ import 'features/search/widgets/status_bar.dart';
 import 'features/search/widgets/top_menu_bar.dart';
 import 'features/search/widgets/virtualized_table.dart';
 import 'features/search/widgets/sidebar_tree.dart';
+import 'features/search/widgets/preview_pane.dart';
 import 'core/ffi/api.dart' as ffi;
 
 Future<void> _initRustLib() async {
@@ -800,6 +801,7 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
                             children: [
                               SidebarTree(),
                               Expanded(child: VirtualizedTable()),
+                              PreviewPane(),
                             ],
                           ),
                         ),

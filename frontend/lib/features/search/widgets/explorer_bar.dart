@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/ffi/api.dart' as ffi;
 import '../../../core/theme/app_colors.dart';
+import '../providers/preview_provider.dart';
 import '../providers/search_provider.dart';
 
 /// Barra de navegación del explorador: atrás, adelante, subir, miga de pan y
@@ -69,6 +70,17 @@ class ExplorerBar extends ConsumerWidget {
             child: buscando
                 ? _AmbitoDeBusqueda(estado: estado)
                 : _RutaEditable(path: estado.browsePath),
+          ),
+          const SizedBox(width: 8),
+          const VerticalDivider(width: 1, color: AppColors.border, indent: 8, endIndent: 8),
+          const SizedBox(width: 4),
+          _boton(
+            icono: ref.watch(previewProvider).isVisible
+                ? Icons.preview_rounded
+                : Icons.preview_outlined,
+            tooltip: 'Panel de vista previa (Alt+P)',
+            activo: true,
+            onTap: () => ref.read(previewProvider.notifier).toggle(),
           ),
         ],
       ),
