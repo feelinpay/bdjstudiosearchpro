@@ -36,7 +36,7 @@ impl QueryEvaluator {
                 exts.iter().any(|e| e.eq_ignore_ascii_case(actual_ext))
             }
             QueryAst::Size { min, max } => {
-                let s = view.size[idx];
+                let s = view.size_of(idx);
                 if min.is_some_and(|min_val| s < min_val) {
                     return false;
                 }

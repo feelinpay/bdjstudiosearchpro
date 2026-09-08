@@ -7,13 +7,19 @@ pub const DEFAULT_UNIX_SOCKET_PATH: &str = "/var/run/bdj_search_pro.sock";
 
 /// Ruta del socket de control resuelta en tiempo de ejecución.
 ///
-/// En macOS el agente de usuario no puede escribir en `/var/run`; el socket
-/// vive en la carpeta de soporte de la aplicación, junto a los datos del
-/// índice (la misma decisión que ya tomó Sample Pad para el almacenamiento).
-/// `/var/run` queda como respaldo para procesos que corran como root.
+/// En macOS el socket vive preferentemente en la carpeta del sistema
+/// `/Library/Application Support/BDJ Studio/Search Pro/bdj_search_pro.sock`
+/// para que tanto el LaunchDaemon (root) como la app de usuario (Flutter)
+/// compartan el mismo canal de comunicación. Si esa carpeta no es escribible
+/// (por ejemplo, en desarrollo local), cae a la carpeta de usuario o `/var/run`.
 pub fn default_unix_socket_path() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
+        let system_dir = PathBuf::from("/Library/Application Support/BDJ Studio/Search Pro");
+        let system_sock = system_dir.join("bdj_search_pro.sock");
+        if system_dir.exists() || system_sock.exists() {
+            return system_sock;
+        }
         if let Ok(home) = std::env::var("HOME") {
             let dir = PathBuf::from(home)
                 .join("Library")
@@ -47,11 +53,11 @@ impl UnixSocketServer {
 
         let listener = UnixListener::bind(&p)?;
 
-        // Set 0660 permissions on socket (read/write for user and group)
+        // Permisos 0666 para permitir conexión local desde cualquier usuario del sistema
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o660));
+            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666));
         }
 
         Ok(Self { listener, path: p })

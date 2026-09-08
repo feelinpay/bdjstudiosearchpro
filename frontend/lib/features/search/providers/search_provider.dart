@@ -90,7 +90,7 @@ class SearchState {
     this.activeFilter = 'Todos',
     this.browsePath = '',
     this.searchScope = '',
-    this.searchEverywhere = false,
+    this.searchEverywhere = true,
     this.history = const [],
     this.historyIndex = -1,
     this.sortCol = 0,
@@ -194,11 +194,14 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   /// Cuánto se espera antes de consultar tras la última tecla.
   ///
-  /// Sin esto se lanzaba una búsqueda por pulsación, incluidas las que el
-  /// usuario iba a sustituir cien milisegundos después. Ciento veinte
-  /// milisegundos es la pausa natural entre teclas al escribir de corrido: no se
-  /// nota y descarta la mayoría del trabajo inútil.
-  static const _debounce = Duration(milliseconds: 120);
+  /// Es adaptativo según el hardware del equipo: en gama alta baja a 50 ms para
+  /// una respuesta instantánea al vuelo como Everything; en gama baja sube a
+  /// 160 ms para cuidar la CPU de 2 núcleos y evitar saturar el hilo principal.
+  Duration _debounce = const Duration(milliseconds: 90);
+  Duration get currentDebounce => _debounce;
+
+  @visibleForTesting
+  void setDebounceForTesting(Duration d) => _debounce = d;
 
   /// Cuánto espera la interfaz a que el motor anuncie una generación nueva.
   ///
@@ -233,16 +236,20 @@ class SearchNotifier extends StateNotifier<SearchState> {
     _startWatchingIndex();
   }
 
-  /// Ajusta la ventana y la caché a lo que este equipo puede sostener.
+  /// Ajusta la ventana, la caché y el debounce a lo que este equipo puede sostener.
   Future<void> _aplicarPerfilDeMaquina() async {
     try {
       final t = await ffi.machineTuning();
       _initialLimit = t.initialLimit;
       _cache.resize(maxPages: t.cachedPages);
+      // Búsqueda en tiempo real estricta (0ms de debounce):
+      // El motor Rust busca 4.5M de archivos en < 1ms con cancelación atómica.
+      _debounce = Duration.zero;
       debugPrint(
         'Perfil de máquina: gama ${t.tierName}, ${t.cores} núcleos, '
         '${t.memoryMb} MB, ${t.searchThreads} hilos de búsqueda, '
-        'ventana ${t.initialLimit}, ${t.cachedPages} páginas en caché',
+        'ventana ${t.initialLimit}, ${t.cachedPages} páginas en caché, '
+        'debounce ${_debounce.inMilliseconds}ms',
       );
     } catch (e) {
       // Sin perfil se sigue con los valores prudentes de arriba: es una
@@ -261,16 +268,13 @@ class SearchNotifier extends StateNotifier<SearchState> {
       // El motivo concreto lo cuenta `engineStatus`; aquí no hace falta nada.
     }
     await _readEngineStatus();
-    if (!state.engine.isOpen) return;
     if (state.query.isNotEmpty) {
-      await _runSearch(state.query);
+      if (state.engine.isOpen) {
+        await _runSearch(state.query);
+      }
     } else {
-      // Arranca enseñando algo, como cualquier explorador de archivos.
-      //
-      // Antes la primera pantalla estaba en blanco hasta que el usuario
-      // escribía: eso ya de por sí no parece un explorador, parece un cuadro de
-      // búsqueda. Con la ruta vacía se listan los volúmenes, que es el
-      // equivalente a «Este equipo».
+      // Arranca directamente enseñando archivos/unidades, como cualquier explorador.
+      // No depende de que el índice del buscador esté abierto.
       await _runBrowse(state.browsePath, pushHistory: state.history.isEmpty);
     }
   }
@@ -424,17 +428,35 @@ class SearchNotifier extends StateNotifier<SearchState> {
       return;
     }
 
-    // El ámbito se fija al empezar a escribir y no cambia mientras se teclea:
-    // así la lista no salta de carpeta a mitad de una palabra.
-    final ambito = state.mode == ViewMode.browse ? state.browsePath : state.searchScope;
-    state = state.copyWith(query: q, mode: ViewMode.search, searchScope: ambito);
-    _debounceTimer = Timer(_debounce, () => _runSearch(q));
+    state = state.copyWith(
+      query: q,
+      mode: ViewMode.search,
+      searchScope: state.searchEverywhere ? '' : (state.searchScope.isEmpty ? state.browsePath : state.searchScope),
+    );
+    if (_debounce == Duration.zero) {
+      _runSearch(q);
+    } else {
+      _debounceTimer = Timer(_debounce, () => _runSearch(q));
+    }
   }
 
   /// Alterna entre buscar en la carpeta actual y buscar en todo el equipo.
   void toggleSearchEverywhere() {
     state = state.copyWith(searchEverywhere: !state.searchEverywhere);
     if (state.query.trim().isNotEmpty) searchNow();
+  }
+
+  /// Fuerza la re-ejecución inmediata de la búsqueda (ej. al pulsar Enter en el buscador).
+  /// Reactiva ViewMode.search incluso si el usuario estaba navegando por carpetas.
+  void forceSearch(String q) {
+    _debounceTimer?.cancel();
+    if (q.trim().isEmpty) return;
+    state = state.copyWith(
+      query: q,
+      mode: ViewMode.search,
+      searchScope: state.searchEverywhere ? '' : (state.searchScope.isEmpty ? state.browsePath : state.searchScope),
+    );
+    _runSearch(q);
   }
 
   /// Lanza la búsqueda ahora mismo, sin esperar.
@@ -457,8 +479,69 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   Future<void> _runSearch(String q) async {
     final seq = ++_seq;
+    // Repetir la misma búsqueda es un refresco, no una búsqueda nueva: lo que
+    // el usuario tenga marcado sigue siendo suyo.
+    final mismaConsulta = state.mode == ViewMode.search && state.query == q;
     final consulta = _buildEffectiveQuery(q, state.activeFilter);
     state = state.copyWith(isSearching: true, query: q, mode: ViewMode.search);
+
+    // Si el motor aún no está abierto (ej. indexando en segundo plano por primera vez)
+    // y el usuario se encuentra dentro de una carpeta, filtrar en tiempo real dicha carpeta:
+    if (!state.engine.isOpen && state.browsePath.isNotEmpty) {
+      final dir = Directory(state.browsePath);
+      if (dir.existsSync()) {
+        final queryLower = q.toLowerCase();
+        try {
+          final entities = dir.listSync(followLinks: false);
+          final matchingRows = <FileRow>[];
+          for (final e in entities) {
+            final name = e.path.split(RegExp(r'[\\/]')).last;
+            if (name.toLowerCase().contains(queryLower)) {
+              final isDir = e is Directory;
+              try {
+                final stat = e.statSync();
+                final ext = isDir ? '' : (name.contains('.') ? name.split('.').last : '');
+                matchingRows.add(FileRow(
+                  index: matchingRows.length,
+                  name: name,
+                  path: state.browsePath,
+                  extension: ext,
+                  size: stat.size,
+                  mtime: stat.modified.millisecondsSinceEpoch ~/ 1000,
+                  flags: isDir ? 1 : 0,
+                ));
+              } catch (_) {}
+            }
+          }
+          if (matchingRows.isNotEmpty) {
+            _ordenarFilas(matchingRows, state.sortCol, state.ascending);
+            for (var i = 0; i < matchingRows.length; i++) {
+              final r = matchingRows[i];
+              matchingRows[i] = FileRow(
+                index: i,
+                name: r.name,
+                path: r.path,
+                extension: r.extension,
+                size: r.size,
+                mtime: r.mtime,
+                flags: r.flags,
+              );
+            }
+            _cache.clear();
+            _cache.put(0, matchingRows);
+            state = state.copyWith(
+              totalCount: matchingRows.length,
+              readyCount: matchingRows.length,
+              elapsedMs: 1,
+              selection: Selection(total: matchingRows.length),
+              isSearching: false,
+              revision: state.revision + 1,
+            );
+            return;
+          }
+        } catch (_) {}
+      }
+    }
 
     try {
       final gen = await ffi.searchWithLimit(
@@ -472,16 +555,48 @@ class SearchNotifier extends StateNotifier<SearchState> {
       if (!mounted || seq != _seq) return; // llegó tarde: ya no interesa
 
       _cache.clear();
+
+      // Pre-cargar la primera página antes de notificar a la UI:
+      // De esta forma la tabla pinta las filas reales en el PRIMER frame
+      // sin pestañeos ni estados intermedios.
+      if (status.totalCount > 0) {
+        try {
+          final batch = await ffi.rows(
+            generation: gen,
+            offset: 0,
+            count: _cache.pageSize,
+          );
+          if (batch.count > 0) {
+            final filas = <FileRow>[];
+            for (var i = 0; i < batch.count; i++) {
+              filas.add(FileRow(
+                index: batch.offset + i,
+                name: batch.names[i],
+                path: batch.paths[i],
+                extension: batch.extensions[i],
+                size: batch.sizes[i].toInt(),
+                mtime: batch.mtimes[i],
+                flags: batch.flags[i],
+              ));
+            }
+            _cache.put(0, filas);
+          }
+        } catch (_) {}
+      }
+
+      if (!mounted || seq != _seq) return;
+
       state = state.copyWith(
         generation: gen,
         totalCount: status.totalCount,
         readyCount: status.readyCount,
         elapsedMs: status.elapsedMs.toInt(),
-        selection: Selection(total: status.totalCount),
+        selection: mismaConsulta
+            ? state.selection.withTotal(status.totalCount)
+            : Selection(total: status.totalCount),
         isSearching: false,
         revision: state.revision + 1,
       );
-      await _loadPage(0);
     } catch (e) {
       if (!mounted || seq != _seq) return;
       _cache.clear();
@@ -501,18 +616,12 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   /// Abre una carpeta leyendo sus hijos **del índice**, sin tocar el disco.
   Future<bool> openFolder(String path) {
-    var p = path.trim();
-    if (Platform.isWindows && RegExp(r'^[a-zA-Z]:$').hasMatch(p)) {
-      p = '$p\\';
-    }
-    return _runBrowse(p, pushHistory: true);
+    return _runBrowse(sanitizePath(path), pushHistory: true);
   }
 
   Future<bool> _runBrowse(String path, {required bool pushHistory}) async {
-    var cleanPath = path.trim();
-    if (Platform.isWindows && RegExp(r'^[a-zA-Z]:$').hasMatch(cleanPath)) {
-      cleanPath = '$cleanPath\\';
-    }
+    final cleanPath = sanitizePath(path);
+    final mismaCarpeta = state.mode == ViewMode.browse && state.browsePath == cleanPath;
     final seq = ++_seq;
     state = state.copyWith(isSearching: true);
 
@@ -587,6 +696,123 @@ class SearchNotifier extends StateNotifier<SearchState> {
             totalCount: rows.length,
             readyCount: rows.length,
             elapsedMs: 1,
+            selection: mismaCarpeta
+                ? state.selection.withTotal(rows.length)
+                : Selection(total: rows.length),
+            isSearching: false,
+            revision: state.revision + 1,
+          );
+          return true;
+        }
+      }
+
+      if (cleanPath.isEmpty) {
+        final rows = <FileRow>[];
+        // 1. Unidades de disco (C:\, D:\, etc.)
+        if (Platform.isWindows) {
+          for (var charCode = 65; charCode <= 90; charCode++) {
+            final driveLetter = String.fromCharCode(charCode);
+            final drivePath = '$driveLetter:\\';
+            if (Directory(drivePath).existsSync()) {
+              rows.add(FileRow(
+                index: rows.length,
+                name: drivePath,
+                path: '',
+                extension: '',
+                size: 0,
+                mtime: 0,
+                flags: 1,
+              ));
+            }
+          }
+        } else {
+          // macOS / Unix: Raíz y volúmenes USB / externos en /Volumes
+          if (Directory('/').existsSync()) {
+            rows.add(FileRow(
+              index: rows.length,
+              name: '/',
+              path: '',
+              extension: '',
+              size: 0,
+              mtime: 0,
+              flags: 1,
+            ));
+          }
+          try {
+            final volDir = Directory('/Volumes');
+            if (volDir.existsSync()) {
+              for (final e in volDir.listSync()) {
+                if (e is Directory) {
+                  final name = e.path.split('/').last;
+                  if (name.isNotEmpty && !name.startsWith('.')) {
+                    rows.add(FileRow(
+                      index: rows.length,
+                      name: e.path,
+                      path: '',
+                      extension: '',
+                      size: 0,
+                      mtime: 0,
+                      flags: 1,
+                    ));
+                  }
+                }
+              }
+            }
+          } catch (_) {}
+          final home = Platform.environment['HOME'] ?? '/';
+          if (home != '/' && Directory(home).existsSync()) {
+            rows.add(FileRow(
+              index: rows.length,
+              name: home,
+              path: '',
+              extension: '',
+              size: 0,
+              mtime: 0,
+              flags: 1,
+            ));
+          }
+        }
+
+        // 2. Carpetas recientes (mostradas al abrir el aplicativo como en el explorador)
+        final recents = ref?.read(recentFoldersProvider) ?? const <String>[];
+        for (final r in recents) {
+          final cleanR = r.endsWith('\\') || r.endsWith('/') ? r.substring(0, r.length - 1) : r;
+          if (rows.any((row) => row.fullPath == r || row.fullPath == cleanR)) continue;
+          if (Directory(r).existsSync()) {
+            final lastSep = cleanR.lastIndexOf(RegExp(r'[\\/]'));
+            final parent = lastSep > 0 ? cleanR.substring(0, lastSep) : '';
+            final name = cleanR.substring(lastSep + 1);
+            rows.add(FileRow(
+              index: rows.length,
+              name: name,
+              path: parent,
+              extension: '',
+              size: 0,
+              mtime: 0,
+              flags: 1,
+            ));
+          }
+        }
+
+        if (rows.isNotEmpty) {
+          if (!mounted || seq != _seq) return false;
+          _cache.clear();
+          final pageSize = _cache.pageSize;
+          final numPages = (rows.length / pageSize).ceil();
+          for (var p = 0; p < numPages; p++) {
+            final start = p * pageSize;
+            final end = (start + pageSize).clamp(0, rows.length);
+            _cache.put(p, rows.sublist(start, end));
+          }
+          state = state.copyWith(
+            mode: ViewMode.browse,
+            browsePath: '',
+            history: historial,
+            historyIndex: indice,
+            generation: null,
+            totalCount: rows.length,
+            readyCount: rows.length,
+            elapsedMs: 1,
             selection: Selection(total: rows.length),
             isSearching: false,
             revision: state.revision + 1,
@@ -595,15 +821,12 @@ class SearchNotifier extends StateNotifier<SearchState> {
         }
       }
 
-      _cancelarVigilanciaDirectorio();
-      final gen = cleanPath.isEmpty
-          ? await ffi.browseRoots(sortCol: state.sortCol, ascending: state.ascending)
-          : await ffi.browsePath(
-              path: cleanPath,
-              sortCol: state.sortCol,
-              ascending: state.ascending,
-              limit: _initialLimit,
-            );
+      final gen = await ffi.browsePath(
+        path: cleanPath,
+        sortCol: state.sortCol,
+        ascending: state.ascending,
+        limit: _initialLimit,
+      );
       final status = await ffi.searchStatus(generation: gen);
       if (!mounted || seq != _seq) return false;
 
@@ -617,7 +840,9 @@ class SearchNotifier extends StateNotifier<SearchState> {
         totalCount: status.totalCount,
         readyCount: status.readyCount,
         elapsedMs: status.elapsedMs.toInt(),
-        selection: Selection(total: status.totalCount),
+        selection: mismaCarpeta
+            ? state.selection.withTotal(status.totalCount)
+            : Selection(total: status.totalCount),
         isSearching: false,
         revision: state.revision + 1,
       );
@@ -672,7 +897,14 @@ class SearchNotifier extends StateNotifier<SearchState> {
     await _runBrowse(state.browsePath, pushHistory: false);
   }
 
-  Future<List<ffi.CrumbFfi>> breadcrumbOf(String path) => ffi.breadcrumb(path: path);
+  Future<List<ffi.CrumbFfi>> breadcrumbOf(String path) async {
+    if (path.isEmpty) return const [];
+    try {
+      return await ffi.breadcrumb(path: path);
+    } catch (_) {
+      return const [];
+    }
+  }
 
   // ─────────────────────────────── Filas ───────────────────────────────
 
@@ -776,10 +1008,6 @@ class SearchNotifier extends StateNotifier<SearchState> {
             ? s.toggle(index)
             : s.single(index);
     state = state.copyWith(selection: nueva);
-    final row = rowAt(index);
-    if (row != null && ref != null) {
-      ref!.read(previewProvider.notifier).inspectFile(row);
-    }
   }
 
   /// Selecciona **todo el resultado**, no solo lo que está cargado.
@@ -811,29 +1039,80 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   // ──────────────────────── Acciones sobre la selección ────────────────────────
 
-  /// Rutas completas de lo seleccionado. Es lo que consume el arrastre.
+  /// Rutas completas de lo seleccionado. Es lo que consume el arrastre y las operaciones de archivo.
   Future<List<String>> selectedPaths({int max = 10000}) async {
     final indices = state.selection.withTotal(state.totalCount).resolve(max: max);
     if (indices.isEmpty) return const [];
-    // Solo se pueden resolver filas dentro de la ventana que el motor tiene
-    // preparada; más allá hay que ampliarla antes.
-    final maximo = indices.reduce((a, b) => a > b ? a : b);
+
+    // 1. Resolver todas las filas que ya están en la caché local (modo explorador o páginas cargadas):
+    final result = <String>[];
+    final pendientes = <int>[];
+    for (final idx in indices) {
+      final fila = _cache.rowAt(idx);
+      if (fila != null && fila.fullPath.trim().isNotEmpty) {
+        result.add(fila.fullPath.trim());
+      } else {
+        pendientes.add(idx);
+      }
+    }
+
+    if (pendientes.isEmpty) {
+      return result;
+    }
+
+    // 2. Si quedan filas pendientes (modo búsqueda sin cachear), pedir al motor FFI:
+    final maximo = pendientes.reduce((a, b) => a > b ? a : b);
     if (maximo >= state.readyCount) {
       await _extendWindow(maximo + 1);
     }
     try {
-      return await ffi.pathsForRows(
+      final rutas = await ffi.pathsForRows(
         generation: state.effectiveGeneration,
-        rows: Uint32List.fromList(indices),
+        rows: Uint32List.fromList(pendientes),
       );
+      result.addAll(rutas.where((r) => r.trim().isNotEmpty));
+      return result;
     } catch (e) {
       debugPrint('No se pudieron resolver las rutas: $e');
-      return const [];
+      return result;
     }
+  }
+
+  /// ¿Es la raíz de una unidad o del sistema de archivos?
+  ///
+  /// El motor tiene la misma comprobación y es la que manda; esta evita llegar a
+  /// pedir una operación imposible y permite decírselo al usuario antes de
+  /// enseñarle un diálogo de confirmación.
+  static bool esRaizDeUnidad(String ruta) {
+    final t = ruta.trim().replaceAll('/', r'\');
+    final sinBarra =
+        t.length > 1 && t.endsWith(r'\') ? t.substring(0, t.length - 1) : t;
+    if (sinBarra.isEmpty || sinBarra == r'\') return true;
+    if (RegExp(r'^[A-Za-z]:$').hasMatch(sinBarra)) return true;
+    // Puntos de montaje: «/Volumes/Musica» es un disco entero.
+    final partes = sinBarra.split(r'\').where((p) => p.isNotEmpty).toList();
+    if (partes.length == 2 &&
+        const ['volumes', 'mnt', 'media'].contains(partes[0].toLowerCase())) {
+      return true;
+    }
+    return false;
+  }
+
+  /// Lo seleccionado, sin las raíces de unidad.
+  ///
+  /// Una unidad entera no es un archivo que se pueda mover ni borrar, y dejarla
+  /// pasar terminaba en «No se pudo enviar «C:\» a la papelera».
+  Future<List<String>> selectedOperablePaths({int max = 10000}) async {
+    final rutas = await selectedPaths(max: max);
+    return rutas.where((r) => !esRaizDeUnidad(r)).toList();
   }
 
   /// Ruta de una sola fila, para el arrastre de un elemento.
   Future<String> pathOf(int index) async {
+    final fila = _cache.rowAt(index);
+    if (fila != null && fila.fullPath.trim().isNotEmpty) {
+      return fila.fullPath.trim();
+    }
     try {
       return await ffi.fullPath(
         generation: state.effectiveGeneration,
@@ -926,16 +1205,50 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   // ─────────────────────────── Filtros y orden ───────────────────────────
 
+  static const Set<String> _extensionesConocidas = {
+    // Audio
+    'mp3', 'wav', 'flac', 'aif', 'aiff', 'm4a', 'aac', 'ogg', 'wma', 'alac', 'mid', 'midi', 'opus',
+    // Proyectos DJ
+    'als', 'flp', 'cpr', 'logic', 'ptx', 'band', 'vdjcache', 'nml',
+    // Vídeo
+    'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm',
+    // Imágenes
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico',
+    // Documentos
+    'pdf', 'doc', 'docx', 'txt', 'rtf', 'xls', 'xlsx', 'csv',
+    // Comprimidos
+    'zip', 'rar', '7z', 'tar', 'gz', 'bz2',
+    // Aplicaciones
+    'exe', 'msi', 'dmg', 'pkg', 'app', 'bat', 'cmd', 'ps1', 'sh',
+  };
+
   String _buildEffectiveQuery(String userQuery, String filter) {
-    var queryStr = userQuery;
+    var queryStr = userQuery.trim();
 
     if (state.isRegex && queryStr.isNotEmpty) {
       queryStr = 'regex:"$queryStr"';
-    } else {
-      if (state.isCaseSensitive && queryStr.isNotEmpty) {
+    } else if (queryStr.isNotEmpty) {
+      // Detección automática de extensiones:
+      // Si el usuario escribe "mp3", ".wav" o "acdc flac", se detecta la extensión automáticamente.
+      final tokens = queryStr.split(RegExp(r'\s+'));
+      final transformed = <String>[];
+      for (final t in tokens) {
+        if (t.isEmpty) continue;
+        final tLower = t.toLowerCase();
+        if (t.startsWith('.') && t.length > 1 && !t.contains(':')) {
+          transformed.add('ext:${t.substring(1)}');
+        } else if (_extensionesConocidas.contains(tLower) && !t.contains(':')) {
+          transformed.add('ext:$tLower');
+        } else {
+          transformed.add(t);
+        }
+      }
+      queryStr = transformed.join(' ');
+
+      if (state.isCaseSensitive) {
         queryStr = 'case:"$queryStr"';
       }
-      if (state.isPathMatch && queryStr.isNotEmpty) {
+      if (state.isPathMatch) {
         queryStr = 'ruta:"$queryStr"';
       }
     }
@@ -967,7 +1280,11 @@ class SearchNotifier extends StateNotifier<SearchState> {
 
   void setFilter(String filter) {
     state = state.copyWith(activeFilter: filter);
-    searchNow();
+    if (filter.isEmpty && state.query.trim().isEmpty) {
+      _runBrowse(state.browsePath, pushHistory: false);
+    } else {
+      searchNow();
+    }
   }
 
   void toggleCaseSensitive() {

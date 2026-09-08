@@ -60,6 +60,9 @@ fn radix_sort_pairs(pairs: &mut Vec<(u64, u32)>, passes: u32) {
     }
 }
 
+/// Un par (clave, identificador), que es lo único que ordena este módulo.
+type Par = (u64, u32);
+
 impl RadixSort {
     /// Ordena pares (clave, id) por clave, de menor a mayor.
     ///
@@ -80,6 +83,56 @@ impl RadixSort {
         radix_sort_pairs(pairs, 8);
     }
 
+    /// Igual que [`Self::sort_pairs`], pero sobre una rodaja.
+    ///
+    /// La ordenación de nombres por tramos trabaja **dentro** de un vector que
+    /// ya existe: cada grupo empatado se reordena en su sitio, sin sacarlo y
+    /// volverlo a meter. Con la versión que exige un `Vec` habría que copiar
+    /// cada grupo a un vector nuevo y devolverlo, que sobre diez millones de
+    /// entradas son millones de reservas de memoria por nada.
+    pub fn sort_pairs_slice(pairs: &mut [(u64, u32)]) {
+        if pairs.len() < 2 {
+            return;
+        }
+        if pairs.len() < COMPARISON_THRESHOLD {
+            pairs.sort_unstable();
+            return;
+        }
+        let n = pairs.len();
+        let mut buffer = vec![(0u64, 0u32); n];
+        let mut src_is_pairs = true;
+        for p in 0..8u32 {
+            let shift = p * 8;
+            let (origen, destino): (&[Par], &mut [Par]) = if src_is_pairs {
+                (&pairs[..], &mut buffer[..])
+            } else {
+                (&buffer[..], &mut pairs[..])
+            };
+            let mut cuenta = [0usize; 256];
+            for &(k, _) in origen.iter() {
+                cuenta[((k >> shift) & 0xFF) as usize] += 1;
+            }
+            // Si todo cae en el mismo cajón, esta pasada no ordena nada.
+            if cuenta.contains(&origen.len()) {
+                continue;
+            }
+            let mut acumulado = 0usize;
+            for c in cuenta.iter_mut() {
+                let n = *c;
+                *c = acumulado;
+                acumulado += n;
+            }
+            for &par in origen.iter() {
+                let cajon = ((par.0 >> shift) & 0xFF) as usize;
+                destino[cuenta[cajon]] = par;
+                cuenta[cajon] += 1;
+            }
+            src_is_pairs = !src_is_pairs;
+        }
+        if !src_is_pairs {
+            pairs.copy_from_slice(&buffer);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -12,7 +12,13 @@ pub struct IndexView<'a> {
     pub flags: &'a [u8],
     pub ext_id: &'a [u16],
     pub volume: &'a [u8],
-    pub size: &'a [u64],
+    /// Tamaño en cuatro bytes. El valor [`SIZE_IN_SIDE_TABLE`] significa que el
+    /// real está en la tabla aparte; se lee con [`IndexView::size_of`].
+    pub size: &'a [u32],
+    /// Identificadores de los archivos de 4 GiB o más, ordenados.
+    pub size_big_id: &'a [u32],
+    /// Sus tamaños reales, en el mismo orden.
+    pub size_big_val: &'a [u64],
     pub mtime: &'a [u32],
     pub ctime: &'a [u32],
     pub alive: &'a [u64],
@@ -56,6 +62,26 @@ impl std::fmt::Display for ViewError {
 impl std::error::Error for ViewError {}
 
 impl<'a> IndexView<'a> {
+    /// Tamaño real de una entrada.
+    ///
+    /// Casi siempre es una lectura de cuatro bytes. Solo los archivos de 4 GiB
+    /// o más obligan a mirar la tabla aparte, y esa se busca por bisección sobre
+    /// una lista que en un disco normal tiene unas pocas decenas de entradas.
+    #[inline]
+    pub fn size_of(&self, idx: usize) -> u64 {
+        match self.size.get(idx) {
+            Some(&super::layout::SIZE_IN_SIDE_TABLE) => {
+                let id = idx as u32;
+                match self.size_big_id.binary_search(&id) {
+                    Ok(pos) => self.size_big_val.get(pos).copied().unwrap_or(0),
+                    Err(_) => 0,
+                }
+            }
+            Some(&s) => s as u64,
+            None => 0,
+        }
+    }
+
     /// Zero-copy initialization directly from an aligned mmapped byte buffer.
     pub fn from_bytes(bytes: &'a [u8]) -> Result<Self, ViewError> {
         let min_size = std::mem::size_of::<Header>() + std::mem::size_of::<SectionTable>();
@@ -110,7 +136,7 @@ impl<'a> IndexView<'a> {
         let flags: &'a [u8] = get_slice(SectionId::Flags, 1)?;
         let ext_id: &'a [u16] = bytemuck::cast_slice(get_slice(SectionId::ExtId, 2)?);
         let volume: &'a [u8] = get_slice(SectionId::Volume, 1)?;
-        let size: &'a [u64] = bytemuck::cast_slice(get_slice(SectionId::Size, 8)?);
+        let size: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::Size, 4)?);
         let mtime: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::Mtime, 4)?);
         let ctime: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::Ctime, 4)?);
         let alive: &'a [u64] = bytemuck::cast_slice(get_slice(SectionId::Alive, 8)?);
@@ -118,6 +144,8 @@ impl<'a> IndexView<'a> {
         let name_rank: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::NameRank, 4)?);
         let child_off: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::ChildOff, 4)?);
         let child_idx: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::ChildIdx, 4)?);
+        let size_big_id: &'a [u32] = bytemuck::cast_slice(get_slice(SectionId::SizeBigId, 4)?);
+        let size_big_val: &'a [u64] = bytemuck::cast_slice(get_slice(SectionId::SizeBigVal, 8)?);
         let name_arena: &'a [u8] = get_slice(SectionId::NameArena, 1)?;
 
         let ext_bytes = get_slice(SectionId::ExtTable, 1)?;
@@ -138,6 +166,8 @@ impl<'a> IndexView<'a> {
             ext_id,
             volume,
             size,
+            size_big_id,
+            size_big_val,
             mtime,
             ctime,
             alive,

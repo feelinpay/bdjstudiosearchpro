@@ -241,6 +241,43 @@ fn reload_overlay(index_path: &Path, base_generation: u64, forzar: bool) -> bool
 /// sola en cuanto el servicio publique la siguiente.
 fn tracing_no_op(_e: &bdj_search_core::index::OverlayFileError) {}
 
+/// Número de contrato de esta superficie FFI.
+///
+/// # Para qué sirve
+///
+/// La aplicación y el motor son dos binarios que se compilan por separado: el
+/// motor con `cargo build --release`, los enlaces con
+/// `flutter_rust_bridge_codegen generate`. Se puede hacer uno sin el otro, y ahí
+/// empieza el problema.
+///
+/// Los argumentos cruzan esta frontera **por posición**. Si los enlaces se
+/// regeneran tras añadir un parámetro y el motor no se recompila, el motor viejo
+/// lee el argumento nuevo como si fuera el siguiente: una cadena donde esperaba
+/// un número, un número donde esperaba un booleano. No falla con un error. Sigue
+/// funcionando, y devuelve basura.
+///
+/// Le pasó a un usuario y costó una tarde: dejaron de funcionar a la vez copiar
+/// el nombre, copiar la ruta, mostrar la ubicación, renombrar, duplicar,
+/// comprimir y enviar a la papelera, todas devolviendo la raíz del volumen. El
+/// código estaba bien; el binario era de cuarenta y siete minutos antes.
+///
+/// # Cómo se usa
+///
+/// **Sube este número cada vez que cambie la superficie FFI**: un parámetro
+/// nuevo, uno que desaparece, un tipo distinto, una función nueva. La aplicación
+/// lo compara al arrancar con el que traen sus enlaces y, si no coinciden, lo
+/// dice claramente en vez de funcionar mal en silencio.
+pub const API_CONTRACT_VERSION: u32 = 3;
+
+/// El contrato que implementa el motor **compilado** que está cargado ahora.
+///
+/// La aplicación compara esto con el número que trae ella. Si el motor es tan
+/// viejo que ni siquiera tiene esta función, la llamada falla, que es igual de
+/// informativo: también significa que hay que recompilar.
+pub fn api_contract_version() -> u32 {
+    API_CONTRACT_VERSION
+}
+
 pub fn ping() -> String {
     "pong from BDJ Search Pro Rust Engine".to_string()
 }
@@ -457,13 +494,24 @@ pub fn reload_if_changed() -> bool {
     // identificadores solo significan algo respecto a una generación concreta.
     let capa_cambio = reload_overlay(&path, generation, base_cambio);
 
-    if capa_cambio && !base_cambio {
-        // El base sigue siendo el mismo, así que la pila de refinamiento —que
-        // solo guarda resultados del base— sigue siendo válida y no se tira. Lo
-        // que sí caduca es el último resultado, porque se calculó fundiendo una
-        // capa que ya no es la de ahora.
-        *LAST.lock() = None;
-    }
+    // Cuando solo cambió la capa, el último resultado **se conserva**.
+    //
+    // Antes se tiraba, razonando que estaba calculado sobre una capa que ya no
+    // era la de ahora. El razonamiento era correcto y la decisión equivocada: la
+    // capa se republica cada vez que pasa algo en el disco, así que tirar el
+    // resultado en cada republicación dejaba a la aplicación sin nada que
+    // resolver justo mientras el usuario tenía el ratón apretado. El síntoma era
+    // un arrastre que el sistema marcaba como prohibido, porque `full_path` y
+    // `paths_for_rows` devolvían vacío al no encontrar la generación pedida.
+    //
+    // Los identificadores del base no cambian mientras el base no cambie, así
+    // que el resultado guardado sigue resolviendo bien. Lo peor que puede pasar
+    // es que durante una fracción de segundo incluya una fila recién borrada, y
+    // eso se corrige solo en cuanto la interfaz repite la consulta, que es justo
+    // lo que va a hacer al recibir el `true` que devuelve esta función.
+    //
+    // Entre una lista un instante desfasada y una lista vacía, la desfasada es
+    // mucho mejor: la vacía rompe la acción que el usuario está haciendo.
 
     base_cambio || capa_cambio
 }
@@ -479,6 +527,22 @@ pub fn reload_if_changed() -> bool {
 /// pueda reintentar sin esperar para siempre.
 pub async fn wait_index_changed(timeout_ms: u64) -> bool {
     let limite = Instant::now() + Duration::from_millis(timeout_ms);
+
+    // El intervalo se ensancha si no pasa nada.
+    //
+    // Sondear cada 30 ms está bien durante el segundo que sigue a un cambio
+    // —ahí es donde se nota la respuesta— pero mantenerlo para siempre son
+    // treinta y tres comprobaciones por segundo, hora tras hora, para no
+    // encontrar nada. En un portátil con batería eso es consumo puro, y es
+    // exactamente el tipo de derroche que no se ve en un sobremesa enchufado.
+    //
+    // Empieza rápido y se relaja hasta un cuarto de segundo. Un cambio que
+    // llegue en el peor momento se ve 250 ms más tarde, que nadie percibe, y el
+    // resto del tiempo el proceso está dormido de verdad.
+    const INICIAL: u64 = 30;
+    const MAXIMO: u64 = 250;
+    let mut espera = INICIAL;
+
     loop {
         if reload_if_changed() {
             return true;
@@ -486,7 +550,8 @@ pub async fn wait_index_changed(timeout_ms: u64) -> bool {
         if Instant::now() >= limite {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(30));
+        tokio::time::sleep(Duration::from_millis(espera)).await;
+        espera = (espera * 2).min(MAXIMO);
     }
 }
 
@@ -854,24 +919,43 @@ pub fn browse_roots(sort_col: u8, ascending: bool) -> u64 {
 /// Miga de pan de una ruta: cada tramo con su nombre y su ruta completa.
 pub fn breadcrumb(path: String) -> Vec<CrumbFfi> {
     let mut out = Vec::new();
-    if path.trim().is_empty() {
+    let trimmed_input = path.trim();
+    if trimmed_input.is_empty() {
         return out;
     }
 
-    let unificada = path.replace('/', "\\");
+    let unificada = trimmed_input.replace('/', "\\");
+    // Si contiene una letra de unidad precedida de barras, despojarlas:
+    let sin_barras_previas = if let Some(pos) = unificada.find(':') {
+        if pos >= 1 {
+            let ch = unificada.as_bytes()[pos - 1];
+            if (b'a'..=b'z').contains(&ch) || (b'A'..=b'Z').contains(&ch) {
+                // Hay una letra de unidad en pos - 1
+                &unificada[(pos - 1)..]
+            } else {
+                unificada.as_str()
+            }
+        } else {
+            unificada.as_str()
+        }
+    } else {
+        unificada.as_str()
+    };
+
     let mut acumulada = String::new();
     let mut primero = true;
 
-    for parte in unificada.split('\\') {
+    for parte in sin_barras_previas.split('\\') {
         if parte.is_empty() {
             if primero {
-                // Ruta absoluta de estilo Unix.
+                // Ruta absoluta de estilo Unix puro (sin letra de unidad).
                 acumulada.push('/');
             }
             continue;
         }
         if primero && parte.ends_with(':') {
             // Letra de unidad de Windows: el tramo es «C:\».
+            acumulada.clear();
             acumulada.push_str(parte);
             acumulada.push('\\');
             out.push(CrumbFfi {
@@ -891,6 +975,7 @@ pub fn breadcrumb(path: String) -> Vec<CrumbFfi> {
         });
         primero = false;
     }
+
     out
 }
 

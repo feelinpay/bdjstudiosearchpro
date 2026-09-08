@@ -106,7 +106,7 @@ fn clave_de(
         0 => Clave::Texto(nombre.clone()),
         1 => Clave::Texto(ruta_completa().to_ascii_lowercase()),
         2 => Clave::Texto(view.get_extension(idx).to_ascii_lowercase()),
-        3 => Clave::Numero(view.size[idx]),
+        3 => Clave::Numero(view.size_of(idx)),
         4 => Clave::Numero(view.mtime[idx] as u64),
         5 => Clave::Numero(rango_de_tipo(view.is_dir(idx), view.get_extension(idx))),
         _ => Clave::Numero(idx as u64),
@@ -547,9 +547,9 @@ mod tests {
             .iter()
             .map(|&id| {
                 if id < base_count {
-                    vista.size[id as usize]
+                    vista.size_of(id as usize)
                 } else {
-                    snap.view().unwrap().size[(id - base_count) as usize]
+                    snap.view().unwrap().size_of((id - base_count) as usize)
                 }
             })
             .collect();

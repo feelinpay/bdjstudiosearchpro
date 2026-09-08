@@ -95,6 +95,7 @@ class PreviewNotifier extends StateNotifier<PreviewState> {
   }
 
   Future<void> inspectFile(FileRow row) async {
+    if (!state.isVisible) return;
     state = state.copyWith(selectedRow: row, isLoading: true, textContent: null, metadata: {});
     final ext = row.name.contains('.') ? row.name.split('.').last.toLowerCase() : '';
 

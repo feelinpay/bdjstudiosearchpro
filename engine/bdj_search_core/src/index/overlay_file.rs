@@ -351,7 +351,7 @@ impl OverlaySnapshot {
                 (view.flags[idx] & super::layout::FLAG_HIDDEN) != 0,
                 (view.flags[idx] & super::layout::FLAG_SYSTEM) != 0,
                 view.volume[idx],
-                view.size[idx],
+                view.size_of(idx),
                 view.mtime[idx],
                 view.ctime[idx],
             );
@@ -404,7 +404,7 @@ mod tests {
 
         let vista = leida.view().unwrap();
         assert_eq!(vista.get_name(0), Some("recien.wav"));
-        assert_eq!(vista.size[0], 4242);
+        assert_eq!(vista.size_of(0), 4242);
         assert_eq!(vista.get_name(1), Some("Sesion"));
         assert!(vista.is_dir(1));
     }

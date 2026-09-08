@@ -32,9 +32,12 @@ class ExplorerBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final estado = ref.watch(searchProvider);
+    final canGoBack = ref.watch(searchProvider.select((s) => s.canGoBack));
+    final canGoForward = ref.watch(searchProvider.select((s) => s.canGoForward));
+    final browsePath = ref.watch(searchProvider.select((s) => s.browsePath));
+    final mode = ref.watch(searchProvider.select((s) => s.mode));
     final notifier = ref.read(searchProvider.notifier);
-    final buscando = estado.mode == ViewMode.search;
+    final buscando = mode == ViewMode.search;
 
     return Container(
       height: 34,
@@ -48,19 +51,19 @@ class ExplorerBar extends ConsumerWidget {
           _boton(
             icono: Icons.arrow_back_rounded,
             tooltip: 'Atrás',
-            activo: estado.canGoBack,
+            activo: canGoBack,
             onTap: notifier.goBack,
           ),
           _boton(
             icono: Icons.arrow_forward_rounded,
             tooltip: 'Adelante',
-            activo: estado.canGoForward,
+            activo: canGoForward,
             onTap: notifier.goForward,
           ),
           _boton(
             icono: Icons.arrow_upward_rounded,
             tooltip: 'Subir un nivel',
-            activo: !buscando && estado.browsePath.isNotEmpty,
+            activo: !buscando && browsePath.isNotEmpty,
             onTap: notifier.goUp,
           ),
           const SizedBox(width: 8),
@@ -68,8 +71,8 @@ class ExplorerBar extends ConsumerWidget {
           const SizedBox(width: 8),
           Expanded(
             child: buscando
-                ? _AmbitoDeBusqueda(estado: estado)
-                : _RutaEditable(path: estado.browsePath),
+                ? _AmbitoDeBusqueda(estado: ref.read(searchProvider))
+                : _RutaEditable(path: browsePath),
           ),
           const SizedBox(width: 8),
           const VerticalDivider(width: 1, color: AppColors.border, indent: 8, endIndent: 8),
@@ -485,7 +488,7 @@ class _MigaDePan extends ConsumerWidget {
         final tramos = snapshot.data ?? const <ffi.CrumbFfi>[];
         return SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          reverse: true,
+          reverse: false,
           child: Row(
             children: [
               InkWell(

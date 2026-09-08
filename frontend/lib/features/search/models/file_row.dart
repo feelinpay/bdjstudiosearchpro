@@ -1,3 +1,33 @@
+import 'dart:io';
+
+import '../../../core/i18n/app_strings.dart';
+
+String sanitizePath(String path) {
+  var p = path.trim();
+  if (Platform.isWindows && p.isNotEmpty) {
+    final match = RegExp(r'^[\\/]+([a-zA-Z]:.*)$').firstMatch(p);
+    if (match != null) {
+      p = match.group(1)!;
+    }
+    if (RegExp(r'^[a-zA-Z]:$').hasMatch(p)) {
+      p = '$p\\';
+    }
+  }
+  return p;
+}
+
+/// Comprueba si una ruta corresponde a una unidad raíz o disco (C:\, D:\, /, /Volumes).
+/// Estas rutas del sistema nunca se deben poder arrastrar ni mover.
+bool esUnidadODisco(String ruta) {
+  final r = ruta.trim();
+  if (r.isEmpty) return true;
+  if (Platform.isWindows) {
+    return RegExp(r'^[a-zA-Z]:[\\/]?$').hasMatch(r);
+  } else {
+    return r == '/' || r == '/Volumes' || r == '/Volumes/';
+  }
+}
+
 class FileRow {
   final int index;
   final String name;
@@ -100,11 +130,23 @@ class FileRow {
   }
 
   String get fullPath {
-    if (path.endsWith('\\') || path.endsWith('/')) {
-      return '$path$name';
+    final cleanName = name.trim();
+    final cleanPath = path.trim();
+    if (cleanPath.isEmpty) return sanitizePath(cleanName);
+    if (cleanName.isEmpty) return sanitizePath(cleanPath);
+    if (cleanName == cleanPath) return sanitizePath(cleanName);
+
+    var result = cleanName;
+    if (Platform.isWindows && RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(cleanName)) {
+      result = cleanName;
+    } else if (cleanPath.endsWith('\\') || cleanPath.endsWith('/')) {
+      result = '$cleanPath$cleanName';
+    } else {
+      final sep = cleanPath.contains('/') ? '/' : '\\';
+      result = '$cleanPath$sep$cleanName';
     }
-    final sep = path.contains('/') ? '/' : '\\';
-    return '$path$sep$name';
+
+    return sanitizePath(result);
   }
 
   String get formattedSize {
@@ -120,20 +162,32 @@ class FileRow {
     return '${s.toStringAsFixed(i == 0 ? 0 : 1)} ${suffixes[i]}';
   }
 
+  static int _todayEpochDay = DateTime.now().millisecondsSinceEpoch ~/ 86400000;
+  static int _lastDayCheck = 0;
+
+  static int get _cachedTodayDay {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastDayCheck > 60000) {
+      _todayEpochDay = now ~/ 86400000;
+      _lastDayCheck = now;
+    }
+    return _todayEpochDay;
+  }
+
   String get formattedDate {
     if (mtime == 0) return '';
     final dt = DateTime.fromMillisecondsSinceEpoch(mtime * 1000);
-    final now = DateTime.now();
-    final diff = now.difference(dt);
+    final fileDay = (mtime * 1000) ~/ 86400000;
+    final diffDays = _cachedTodayDay - fileDay;
 
-    if (diff.inDays == 0) {
+    if (diffDays == 0) {
       final hour = dt.hour.toString().padLeft(2, '0');
       final min = dt.minute.toString().padLeft(2, '0');
-      return 'Hoy $hour:$min';
-    } else if (diff.inDays == 1) {
+      return '${AppStrings.today} $hour:$min';
+    } else if (diffDays == 1) {
       final hour = dt.hour.toString().padLeft(2, '0');
       final min = dt.minute.toString().padLeft(2, '0');
-      return 'Ayer $hour:$min';
+      return '${AppStrings.yesterday} $hour:$min';
     } else {
       final y = dt.year;
       final m = dt.month.toString().padLeft(2, '0');

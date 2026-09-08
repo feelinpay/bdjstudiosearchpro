@@ -71,6 +71,13 @@ class LicenseManager implements LicensingPort {
   /// muestran las demás apps de la suite en la misma máquina.
   Future<String> getHardwareFingerprint() async {
     if (_cachedFingerprint != null) return _cachedFingerprint!;
+    final stored = (await secureStorage.readSecure(
+      LicenseStorageKeys.hardwareFingerprint,
+    )).getOrElse(() => null);
+    if (stored != null && stored.isNotEmpty) {
+      _cachedFingerprint = stored;
+      return _cachedFingerprint!;
+    }
     _cachedFingerprint = await fingerprint.generate();
     await secureStorage.storeSecure(
       LicenseStorageKeys.hardwareFingerprint,

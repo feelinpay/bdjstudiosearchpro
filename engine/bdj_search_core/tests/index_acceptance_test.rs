@@ -111,7 +111,7 @@ fn test_index_build_mmap_and_path_resolution() {
 
         assert_eq!(view.get_name(idx), Some(exp_name.as_str()));
         assert_eq!(view.get_extension(idx), "wav");
-        assert_eq!(view.size[idx], exp_size);
+        assert_eq!(view.size_of(idx), exp_size);
         assert_eq!(view.parent[idx], exp_parent);
 
         // Igualdad exacta, no `contains`: es lo que detecta un prefijo repetido.

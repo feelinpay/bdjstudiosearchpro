@@ -19,7 +19,7 @@ class FilterBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final searchState = ref.watch(searchProvider);
+    final activeFilter = ref.watch(searchProvider.select((s) => s.activeFilter));
     final notifier = ref.read(searchProvider.notifier);
 
     return Container(
@@ -35,7 +35,7 @@ class FilterBar extends ConsumerWidget {
         separatorBuilder: (_, __) => const SizedBox(width: 6),
         itemBuilder: (context, index) {
           final filter = filters[index];
-          final isSelected = filter == searchState.activeFilter;
+          final isSelected = filter == activeFilter;
           return Center(
             child: InkWell(
               borderRadius: BorderRadius.circular(4),

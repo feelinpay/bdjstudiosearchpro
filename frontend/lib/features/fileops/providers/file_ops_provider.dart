@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/ffi/api.dart' as ffi;
+import '../../search/models/file_row.dart';
 import '../../search/providers/search_provider.dart';
 
 /// Lo que hay en el portapapeles interno.
@@ -157,25 +161,102 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
 
   // ─────────────────────────── Portapapeles ───────────────────────────
 
+  static File get _sharedClipboardFile =>
+      File('${Directory.systemTemp.path}${Platform.pathSeparator}bdj_search_clipboard.json');
+
+  Future<void> _writeSharedClipboard(List<String> paths, {required bool isCut}) async {
+    try {
+      _sharedClipboardFile.writeAsStringSync(jsonEncode({
+        'paths': paths,
+        'isCut': isCut,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      }), flush: true);
+    } catch (_) {}
+    try {
+      await Clipboard.setData(ClipboardData(text: paths.join('\n')));
+    } catch (_) {}
+  }
+
+  Future<ClipboardContents> readSharedClipboard() async {
+    // 1. Portapapeles compartido en disco (entre ventanas independientes)
+    try {
+      if (_sharedClipboardFile.existsSync()) {
+        final raw = _sharedClipboardFile.readAsStringSync();
+        if (raw.trim().isNotEmpty) {
+          final json = jsonDecode(raw) as Map<String, dynamic>;
+          final paths = (json['paths'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+          final isCut = json['isCut'] as bool? ?? false;
+          final existing = paths.where((p) => File(p).existsSync() || Directory(p).existsSync()).toList();
+          if (existing.isNotEmpty) {
+            final res = ClipboardContents(paths: existing, isCut: isCut);
+            state = state.copyWith(clipboard: res);
+            return res;
+          }
+        }
+      }
+    } catch (_) {}
+
+    // 2. Portapapeles del sistema operativo
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      if (data?.text != null && data!.text!.trim().isNotEmpty) {
+        final lines = data.text!.split(RegExp(r'[\r\n]+')).map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+        final validPaths = lines.where((l) => File(l).existsSync() || Directory(l).existsSync()).toList();
+        if (validPaths.isNotEmpty) {
+          final res = ClipboardContents(paths: validPaths, isCut: false);
+          state = state.copyWith(clipboard: res);
+          return res;
+        }
+      }
+    } catch (_) {}
+
+    state = state.copyWith(clipboard: const ClipboardContents());
+    return const ClipboardContents();
+  }
+
+  Future<void> copyPaths(List<String> paths, {bool isCut = false}) async {
+    if (paths.isEmpty) return;
+    final res = ClipboardContents(paths: paths, isCut: isCut);
+    state = state.copyWith(clipboard: res);
+    await _writeSharedClipboard(paths, isCut: isCut);
+  }
+
   Future<void> copySelection() async {
-    final rutas = await _ref.read(searchProvider.notifier).selectedPaths(max: 5000);
+    var rutas = await _ref.read(searchProvider.notifier).selectedPaths(max: 5000);
+    if (rutas.isEmpty) {
+      final cur = _ref.read(searchProvider).selection.cursor;
+      final p = await _ref.read(searchProvider.notifier).pathOf(cur);
+      if (p.isNotEmpty) rutas = [p];
+    }
     if (rutas.isEmpty) return;
-    state = state.copyWith(clipboard: ClipboardContents(paths: rutas, isCut: false));
+    await copyPaths(rutas, isCut: false);
   }
 
   Future<void> cutSelection() async {
-    final rutas = await _ref.read(searchProvider.notifier).selectedPaths(max: 5000);
+    var rutas = await _ref
+        .read(searchProvider.notifier)
+        .selectedOperablePaths(max: 5000);
+    if (rutas.isEmpty) {
+      final cur = _ref.read(searchProvider).selection.cursor;
+      final p = await _ref.read(searchProvider.notifier).pathOf(cur);
+      if (p.isNotEmpty && !esUnidadODisco(p)) rutas = [p];
+    }
     if (rutas.isEmpty) return;
-    state = state.copyWith(clipboard: ClipboardContents(paths: rutas, isCut: true));
+    await copyPaths(rutas, isCut: true);
   }
 
   void clearClipboard() {
     state = state.copyWith(clipboard: const ClipboardContents());
+    try {
+      if (_sharedClipboardFile.existsSync()) {
+        _sharedClipboardFile.deleteSync();
+      }
+    } catch (_) {}
   }
 
   /// Pega en `destino`. Devuelve el identificador de la operación, o cero.
   Future<BigInt> pasteInto(String destino) async {
-    final portapapeles = state.clipboard;
+    final portapapeles = await readSharedClipboard();
     if (portapapeles.isEmpty || destino.isEmpty) return BigInt.zero;
 
     final id = portapapeles.isCut
@@ -234,7 +315,9 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
 
   /// Envía lo seleccionado a la papelera. **Nunca borra de forma definitiva.**
   Future<BigInt> trashSelection() async {
-    final rutas = await _ref.read(searchProvider.notifier).selectedPaths(max: 5000);
+    final rutas = await _ref
+        .read(searchProvider.notifier)
+        .selectedOperablePaths(max: 5000);
     if (rutas.isEmpty) return BigInt.zero;
     final id = await ffi.fsopTrash(sources: rutas);
     _ensurePolling();
@@ -247,7 +330,9 @@ class FileOpsNotifier extends StateNotifier<FileOpsState> {
   /// **No se puede deshacer.** La interfaz no debe llamar esto sin la
   /// confirmación explícita (`eliminarPermanentemente`).
   Future<BigInt> deletePermanentlySelection() async {
-    final rutas = await _ref.read(searchProvider.notifier).selectedPaths(max: 5000);
+    final rutas = await _ref
+        .read(searchProvider.notifier)
+        .selectedOperablePaths(max: 5000);
     if (rutas.isEmpty) return BigInt.zero;
     final id = await ffi.fsopDeletePermanently(sources: rutas);
     _ensurePolling();

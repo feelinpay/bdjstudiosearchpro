@@ -1,3 +1,15 @@
+// El servicio no tiene ventana, y por tanto tampoco consola.
+//
+// En Windows, un binario compilado con el subsistema de consola abre una ventana
+// negra al arrancar, y esa ventana **aparece en la barra de tareas**. El usuario
+// veía tres iconos de la aplicación donde solo hay uno: la ventana real, la
+// consola del servicio, y la de un servicio anterior que aún no había muerto.
+// Un servicio en segundo plano no debe tener ni ventana ni botón en la barra.
+//
+// Solo en compilaciones de publicación: en depuración interesa ver el registro
+// por consola al ejecutarlo a mano con `--standalone`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use bdj_search_core::tuning::Tuning;
 use bdj_search_core::index::{
     IndexBuilder, IndexerSettings, MmapIndex, OverlayIndex, SuppressionWindow, overlay_path_for,
@@ -211,6 +223,90 @@ pub struct IndexerService {
     /// que tiene mapeado para saber si hay algo nuevo sin releer el archivo
     /// entero.
     overlay_generation: Arc<AtomicU64>,
+}
+
+/// Memoria máxima que ha llegado a ocupar este proceso, en MB.
+///
+/// Es la marca de agua, no el uso actual: la cifra que decide si un equipo
+/// empieza a paginar durante el primer escaneo. En Windows sale de
+/// `GetProcessMemoryInfo`; en macOS y Linux, del propio sistema de archivos del
+/// proceso. Si no se puede leer se devuelve cero, que en el registro se
+/// distingue perfectamente de un dato real.
+fn pico_de_memoria_mb() -> u64 {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct ContadoresMemoria {
+            cb: u32,
+            page_fault_count: u32,
+            peak_working_set_size: usize,
+            working_set_size: usize,
+            quota_peak_paged_pool_usage: usize,
+            quota_paged_pool_usage: usize,
+            quota_peak_non_paged_pool_usage: usize,
+            quota_non_paged_pool_usage: usize,
+            pagefile_usage: usize,
+            peak_pagefile_usage: usize,
+        }
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn GetProcessMemoryInfo(
+                proceso: isize,
+                contadores: *mut ContadoresMemoria,
+                cb: u32,
+            ) -> i32;
+        }
+        let mut c = ContadoresMemoria {
+            cb: std::mem::size_of::<ContadoresMemoria>() as u32,
+            ..Default::default()
+        };
+        // Seguridad: la estructura es local y su campo `cb` declara su tamaño,
+        // que es lo que la API exige.
+        if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } != 0 {
+            return (c.peak_working_set_size / (1024 * 1024)) as u64;
+        }
+        return 0;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(t) = std::fs::read_to_string("/proc/self/status") {
+            for l in t.lines() {
+                if let Some(r) = l.strip_prefix("VmHWM:")
+                    && let Some(kb) = r.split_whitespace().next()
+                    && let Ok(v) = kb.parse::<u64>()
+                {
+                    return v / 1024;
+                }
+            }
+        }
+        0
+    }
+
+    #[cfg(all(not(windows), not(target_os = "linux")))]
+    {
+        // macOS: `ru_maxrss` viene en bytes.
+        use std::mem::MaybeUninit;
+        unsafe extern "C" {
+            fn getrusage(quien: i32, uso: *mut libc_rusage) -> i32;
+        }
+        #[repr(C)]
+        struct libc_rusage {
+            ru_utime: [i64; 2],
+            ru_stime: [i64; 2],
+            ru_maxrss: i64,
+            resto: [i64; 13],
+        }
+        let mut u = MaybeUninit::<libc_rusage>::zeroed();
+        // Seguridad: la estructura tiene el tamaño que espera la llamada y solo
+        // se lee el campo del máximo.
+        if unsafe { getrusage(0, u.as_mut_ptr()) } == 0 {
+            let u = unsafe { u.assume_init() };
+            return (u.ru_maxrss as u64) / (1024 * 1024);
+        }
+        0
+    }
 }
 
 /// Segundos desde 1970.
@@ -898,7 +994,26 @@ impl IndexerService {
         }
 
         let count = builder.count();
-        tracing::info!("Fase 1 completada: {} entradas. Publicando indice...", count);
+
+        // Cuánto ha costado de verdad, en esta máquina y con este disco.
+        //
+        // Todo lo que se ha ajustado para equipos modestos se decidió sobre un
+        // corpus sintético y una extrapolación. Esta línea sustituye la
+        // extrapolación por el dato: cuántas entradas hay realmente, cuánta
+        // memoria llegó a ocupar el proceso, y cuántos bytes salen por archivo.
+        // Sin ella seguiríamos optimizando a ojo.
+        let pico = pico_de_memoria_mb();
+        tracing::info!(
+            "Fase 1 completada: {} entradas · pico de memoria {} MB ({:.1} B/entrada) · perfil {}",
+            count,
+            pico,
+            if count > 0 {
+                (pico * 1024 * 1024) as f64 / count as f64
+            } else {
+                0.0
+            },
+            Tuning::current().tier.name()
+        );
         self.write_index(&mut builder);
 
         #[cfg(windows)]
@@ -2221,8 +2336,43 @@ fn my_service_main(_arguments: Vec<std::ffi::OsString>) {
     }
 }
 
+fn init_logging() {
+    let log_path = get_index_path().with_file_name("indexer.log");
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(file))
+            .with_ansi(false)
+            .try_init();
+    } else {
+        tracing_subscriber::fmt::init();
+    }
+
+    let panic_log = log_path;
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!(
+            "[{:?}] CRITICAL PANIC in indexer: {}\n",
+            std::time::SystemTime::now(),
+            info
+        );
+        eprintln!("{}", msg);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&panic_log)
+        {
+            use std::io::Write;
+            let _ = f.write_all(msg.as_bytes());
+            let _ = f.flush();
+        }
+    }));
+}
+
 fn main() {
-    tracing_subscriber::fmt::init();
+    init_logging();
 
     let args: Vec<String> = std::env::args().collect();
     #[cfg_attr(not(windows), allow(unused_variables))]

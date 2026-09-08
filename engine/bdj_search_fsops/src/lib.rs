@@ -20,6 +20,7 @@
 //!   acciones concretas. Y una operación que sobrescribió algo se marca como no
 //!   reversible, porque lo pisado no vuelve.
 
+pub mod guards;
 pub mod model;
 pub mod naming;
 mod state;
@@ -27,6 +28,7 @@ mod worker;
 #[cfg(target_os = "macos")]
 mod macos;
 
+pub use guards::{Forbidden, check_all, check_operable, is_volume_root};
 pub use model::*;
 pub use naming::{unique_path, validate_file_name};
 pub use worker::set_copy_chunk;

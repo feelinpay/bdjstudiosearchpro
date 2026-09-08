@@ -1,9 +1,13 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 
+import '../../../core/i18n/app_strings.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../fileops/dnd_utils.dart';
 import '../../fileops/file_ops_dialogs.dart';
 import '../../fileops/providers/file_ops_provider.dart';
 import '../models/file_row.dart';
@@ -21,6 +25,58 @@ import '../providers/search_provider.dart';
 ///   resultado un millón ya no retiene un millón de objetos en memoria.
 class VirtualizedTable extends ConsumerStatefulWidget {
   const VirtualizedTable({super.key});
+
+  static BuildContext? _activeMenuContext;
+  static final String _sharedMenuFile = '${Directory.systemTemp.path}/bdj_active_menu.json';
+  static int _myLastMenuOpenedTime = 0;
+  static Timer? _menuWatchTimer;
+
+  /// Cierra cualquier menú contextual abierto en esta ventana.
+  static void dismissActiveMenu() {
+    final ctx = _activeMenuContext;
+    if (ctx != null && ctx.mounted) {
+      Navigator.of(ctx, rootNavigator: true).maybePop();
+    }
+    _activeMenuContext = null;
+    _menuWatchTimer?.cancel();
+    _menuWatchTimer = null;
+  }
+
+  static void _notifyMenuOpened(BuildContext context) {
+    dismissActiveMenu();
+    _activeMenuContext = context;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _myLastMenuOpenedTime = now;
+    try {
+      File(_sharedMenuFile).writeAsStringSync(now.toString());
+    } catch (_) {}
+
+    _menuWatchTimer?.cancel();
+    _menuWatchTimer = Timer.periodic(const Duration(milliseconds: 150), (timer) {
+      if (_activeMenuContext == null) {
+        timer.cancel();
+        return;
+      }
+      try {
+        final f = File(_sharedMenuFile);
+        if (f.existsSync()) {
+          final content = f.readAsStringSync().trim();
+          final otherTime = int.tryParse(content) ?? 0;
+          if (otherTime > _myLastMenuOpenedTime) {
+            // Otra ventana abrió un menú: cerramos el nuestro de inmediato
+            dismissActiveMenu();
+            timer.cancel();
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  static void _clearMenuOpened() {
+    _activeMenuContext = null;
+    _menuWatchTimer?.cancel();
+    _menuWatchTimer = null;
+  }
 
   @override
   ConsumerState<VirtualizedTable> createState() => _VirtualizedTableState();
@@ -41,17 +97,52 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
     super.dispose();
   }
 
+  void _asegurarVisible(int index, ResultViewMode viewMode) {
+    if (!mounted || !_scrollController.hasClients || index < 0) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients || index < 0) return;
+        _hacerScrollVisible(index, viewMode);
+      });
+      return;
+    }
+    _hacerScrollVisible(index, viewMode);
+  }
+
+  void _hacerScrollVisible(int index, ResultViewMode viewMode) {
+    if (!_scrollController.hasClients) return;
+    final alto = viewMode == ResultViewMode.grid ? 120.0 : _altoFila(viewMode);
+    final targetTop = index * alto;
+    final targetBottom = targetTop + alto;
+    final currentOffset = _scrollController.offset;
+    final viewportHeight = _scrollController.position.viewportDimension;
+
+    if (targetTop < currentOffset) {
+      _scrollController.jumpTo(targetTop);
+    } else if (targetBottom > currentOffset + viewportHeight) {
+      _scrollController.jumpTo(
+        (targetBottom - viewportHeight).clamp(0.0, _scrollController.position.maxScrollExtent),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    ref.listen(searchProvider, (anterior, actual) {
+      if (anterior?.selection.cursor != actual.selection.cursor) {
+        _asegurarVisible(actual.selection.cursor, actual.viewMode);
+      }
+    });
+
     final estado = ref.watch(searchProvider);
     final notifier = ref.read(searchProvider.notifier);
+    final clipboard = ref.watch(fileOpsProvider.select((s) => s.clipboard));
     final viewMode = estado.viewMode;
     final esGrid = viewMode == ResultViewMode.grid;
 
     final cuerpo = estado.rowCount == 0
         ? _EstadoVacio(estado: estado)
         : esGrid
-            ? _grid(estado, notifier)
+            ? _grid(estado, notifier, clipboard)
             : ListView.builder(
                 controller: _scrollController,
                 itemExtent: estado.groupBy == GroupByMode.none ? _altoFila(viewMode) : null,
@@ -70,11 +161,8 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
                     viewMode: viewMode,
                     mostrarRuta: estado.mode == ViewMode.search,
                     seleccionada: estado.selection.contains(index),
-                    onTap: () => _alPulsar(index),
-                    onDoubleTap: () {
-                      notifier.selectRow(index);
-                      notifier.openSelected();
-                    },
+                    cortada: clipboard.isCut && clipboard.paths.contains(fila.fullPath),
+                    onTapDown: () => _onRowTapDown(index),
                     onContextMenu: (posicion) => _menuContextual(
                         context, notifier, ref.read(searchProvider), index, posicion),
                     rutasArrastradas: () => _rutasParaArrastrar(index),
@@ -112,20 +200,40 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
                 },
               );
 
+    final destinoCarpeta = estado.mode == ViewMode.browse ? estado.browsePath : '';
+    Widget dropArea = GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTapDown: (_) => notifier.clearSelection(),
+      onSecondaryTapDown: (d) => _menuDeFondo(context, d.globalPosition),
+      child: cuerpo,
+    );
+
+    if (destinoCarpeta.isNotEmpty) {
+      dropArea = DropRegion(
+        formats: kFileDropFormats,
+        hitTestBehavior: HitTestBehavior.translucent,
+        onDropOver: (event) async {
+          if (dropSessionTieneArchivos(event.session)) {
+            return DropOperation.copy;
+          }
+          return DropOperation.none;
+        },
+        onPerformDrop: (event) async {
+          final rutas = await extraerRutasDeDropSession(event.session);
+          if (rutas.isNotEmpty) {
+            _moverSoltados(rutas, destinoCarpeta);
+          }
+        },
+        child: dropArea,
+      );
+    }
+
     return Column(
       children: [
         if (!esGrid)
           _Cabecera(estado: estado, notifier: notifier, viewMode: viewMode),
         Expanded(
-          // El fondo responde al clic derecho con su propio menú: como en el
-          // Explorador, pulsar donde no hay un elemento crea carpetas o pega.
-          // Las filas ceden la arena de gestos a su propio menú, así que este
-          // menú solo aparece en los huecos.
-          child: GestureDetector(
-            behavior: HitTestBehavior.translucent,
-            onSecondaryTapDown: (d) => _menuDeFondo(context, d.globalPosition),
-            child: cuerpo,
-          ),
+          child: dropArea,
         ),
       ],
     );
@@ -137,7 +245,7 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
   /// una fila —selección, doble clic, menú, arrastre al sistema y sueltas sobre
   /// carpetas— porque un explorador no debe cambiar de personalidad según la
   /// vista.
-  Widget _grid(SearchState estado, SearchNotifier notifier) {
+  Widget _grid(SearchState estado, SearchNotifier notifier, ClipboardContents clipboard) {
     return GridView.builder(
       controller: _scrollController,
       padding: const EdgeInsets.all(12),
@@ -154,11 +262,8 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         return _CasillaIcono(
           fila: fila,
           seleccionada: estado.selection.contains(index),
-          onTap: () => _alPulsar(index),
-          onDoubleTap: () {
-            notifier.selectRow(index);
-            notifier.openSelected();
-          },
+          cortada: clipboard.isCut && clipboard.paths.contains(fila.fullPath),
+          onTapDown: () => _onRowTapDown(index),
           onContextMenu: (posicion) => _menuContextual(
               context, notifier, ref.read(searchProvider), index, posicion),
           rutasArrastradas: () => _rutasParaArrastrar(index),
@@ -166,6 +271,24 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         );
       },
     );
+  }
+
+  int _lastClickTime = 0;
+  int _lastClickIndex = -1;
+
+  void _onRowTapDown(int index) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // 0 milisegundos de latencia: respuesta táctil inmediata sin esperar al timeout del gesture arena
+    _alPulsar(index);
+
+    if (_lastClickIndex == index && (now - _lastClickTime) < 350) {
+      _lastClickTime = 0;
+      _lastClickIndex = -1;
+      ref.read(searchProvider.notifier).openSelected();
+    } else {
+      _lastClickTime = now;
+      _lastClickIndex = index;
+    }
   }
 
   void _alPulsar(int index) {
@@ -184,25 +307,26 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
   Future<List<String>> _rutasParaArrastrar(int index) async {
     final estado = ref.read(searchProvider);
     final notifier = ref.read(searchProvider.notifier);
+    List<String> raw;
     if (estado.selection.contains(index) && estado.selection.count > 1) {
-      return notifier.selectedPaths(max: 5000);
+      raw = await notifier.selectedPaths(max: 5000);
+    } else {
+      final ruta = await notifier.pathOf(index);
+      raw = ruta.isEmpty ? const [] : [ruta];
     }
-    final ruta = await notifier.pathOf(index);
-    return ruta.isEmpty ? const [] : [ruta];
+    return raw.where((r) => !esUnidadODisco(r)).toList();
   }
 
   /// Mueve lo soltado dentro de una carpeta.
-  ///
-  /// Es el «arrastrar y soltar» interno: igual que en el explorador del
-  /// sistema, soltar elementos sobre una carpeta los mueve a esa carpeta. La
-  /// operación pasa por el motor (se puede deshacer y avisa al índice), así que
-  /// la vista se refresca sola al terminar.
   Future<void> _moverSoltados(List<String> rutas, String destino) async {
     if (rutas.isEmpty || destino.isEmpty) return;
-    // No hunde una carpeta dentro de sí misma.
     if (rutas.contains(destino)) return;
+    final filtradas = rutas.where((r) => !esUnidadODisco(r)).toList();
+    if (filtradas.isEmpty) return;
+
     final ops = ref.read(fileOpsProvider.notifier);
-    await ops.moveTo(rutas, destino);
+    await ops.moveTo(filtradas, destino);
+    await ref.read(searchProvider.notifier).refreshAfterFileOperation();
   }
 
   Future<void> _menuContextual(
@@ -220,37 +344,45 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
     }
     final varios = estado.selection.count > 1;
     final ops = ref.read(fileOpsProvider.notifier);
+    final clipboard = await ops.readSharedClipboard();
+    if (!context.mounted) return;
+    final filaClickeada = notifier.rowAt(index);
+    final esCarpetaClickeada = filaClickeada?.isDirectory ?? false;
+    final destinoPegar = esCarpetaClickeada
+        ? (filaClickeada?.fullPath ?? estado.browsePath)
+        : estado.browsePath;
 
+    VirtualizedTable._notifyMenuOpened(context);
     final valor = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(posicion.dx, posicion.dy, posicion.dx, posicion.dy),
       elevation: 4,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
       items: <PopupMenuEntry<String>>[
-        _item('refresh', 'Actualizar'),
-        _item('open', varios ? 'Abrir los seleccionados' : 'Abrir'),
+        _item('refresh', AppStrings.refresh),
+        _item('open', varios ? (AppStrings.isSpanish ? 'Abrir los seleccionados' : 'Open selected') : AppStrings.open),
         const PopupMenuDivider(),
-        _item('cut', varios ? 'Cortar los seleccionados' : 'Cortar'),
-        _item('copy', varios ? 'Copiar los seleccionados' : 'Copiar'),
-        _item('duplicate', 'Duplicar'),
-        if (!varios) _item('rename', 'Cambiar nombre'),
+        _item('cut', varios ? (AppStrings.isSpanish ? 'Cortar los seleccionados' : 'Cut selected') : AppStrings.cut),
+        _item('copy', varios ? (AppStrings.isSpanish ? 'Copiar los seleccionados' : 'Copy selected') : AppStrings.copy),
+        _item('paste', AppStrings.paste, habilitado: clipboard.isNotEmpty && destinoPegar.isNotEmpty),
+        _item('duplicate', AppStrings.duplicate),
+        if (!varios) _item('rename', AppStrings.rename),
         const PopupMenuDivider(),
-        _item('zip', 'Comprimir a archivo ZIP'),
+        _item('zip', AppStrings.compressZip),
         if (notifier.rowAt(index)?.fullPath.toLowerCase().endsWith('.zip') == true)
-          _item('unzip', 'Descomprimir aquí'),
+          _item('unzip', AppStrings.decompressHere),
+        _item('reveal', AppStrings.revealLocation),
+        _item('copypath', varios ? AppStrings.copyPaths : AppStrings.copyPath),
+        _item('copyname', varios ? AppStrings.copyNames : AppStrings.copyName),
         const PopupMenuDivider(),
-        _item('reveal', 'Mostrar la ubicación'),
-        _item('share', 'Compartir…'),
-        _item('copypath', varios ? 'Copiar las rutas' : 'Copiar la ruta'),
-        _item('copyname', varios ? 'Copiar los nombres' : 'Copiar el nombre'),
+        _item('selectall', AppStrings.selectAll),
+        _item('invert', AppStrings.invertSelection),
         const PopupMenuDivider(),
-        _item('selectall', 'Seleccionar todo'),
-        _item('invert', 'Invertir la selección'),
-        const PopupMenuDivider(),
-        _item('trash', 'Enviar a la papelera'),
-        _item('deleteforever', 'Eliminar permanentemente…'),
+        _item('trash', AppStrings.delete),
+        _item('deleteforever', AppStrings.deleteForever),
       ],
     );
+    VirtualizedTable._clearMenuOpened();
     if (!context.mounted) return;
 
     switch (valor) {
@@ -260,16 +392,28 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
         notifier.openSelected();
       case 'reveal':
         notifier.revealSelected();
-      case 'share':
-        notifier.shareSelected();
       case 'copypath':
         notifier.copySelectedPath();
       case 'copyname':
         notifier.copySelectedName();
       case 'cut':
-        await ops.cutSelection();
+        var rutas = await notifier.selectedPaths(max: 5000);
+        if (rutas.isEmpty) {
+          final p = notifier.rowAt(index)?.fullPath ?? await notifier.pathOf(index);
+          if (p.isNotEmpty && !esUnidadODisco(p)) rutas = [p];
+        }
+        await ops.copyPaths(rutas, isCut: true);
       case 'copy':
-        await ops.copySelection();
+        var rutas = await notifier.selectedPaths(max: 5000);
+        if (rutas.isEmpty) {
+          final p = notifier.rowAt(index)?.fullPath ?? await notifier.pathOf(index);
+          if (p.isNotEmpty) rutas = [p];
+        }
+        await ops.copyPaths(rutas, isCut: false);
+      case 'paste':
+        if (destinoPegar.isNotEmpty) {
+          await ops.pasteInto(destinoPegar);
+        }
       case 'duplicate':
         await ops.duplicateSelection();
       case 'rename':
@@ -317,10 +461,12 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
   Future<void> _menuDeFondo(BuildContext context, Offset posicion) async {
     final estado = ref.read(searchProvider);
     final ops = ref.read(fileOpsProvider.notifier);
-    final opsState = ref.read(fileOpsProvider);
+    final clipboard = await ops.readSharedClipboard();
+    if (!context.mounted) return;
     final destino = estado.browsePath;
     final enCarpeta = estado.mode == ViewMode.browse && destino.isNotEmpty;
 
+    VirtualizedTable._notifyMenuOpened(context);
     final valor = await showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(posicion.dx, posicion.dy, posicion.dx, posicion.dy),
@@ -328,15 +474,16 @@ class _VirtualizedTableState extends ConsumerState<VirtualizedTable> {
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
       items: <PopupMenuEntry<String>>[
         if (enCarpeta) ...[
-          _item('newfolder', 'Nueva carpeta'),
-          _item('newfile', 'Nuevo archivo'),
-          _item('paste', 'Pegar', habilitado: opsState.clipboard.isNotEmpty),
+          _item('newfolder', AppStrings.newFolder),
+          _item('newfile', AppStrings.newFile),
+          _item('paste', AppStrings.paste, habilitado: clipboard.isNotEmpty),
           const PopupMenuDivider(),
         ],
-        _item('selectall', 'Seleccionar todo'),
-        _item('invert', 'Invertir la selección'),
+        _item('selectall', AppStrings.selectAll),
+        _item('invert', AppStrings.invertSelection),
       ],
     );
+    VirtualizedTable._clearMenuOpened();
     if (!context.mounted) return;
 
     switch (valor) {
@@ -404,46 +551,58 @@ Widget envolverConArrastre({
   required Future<List<String>> Function() rutasArrastradas,
   void Function(List<String> rutas, String destino)? onSoltarEnCarpeta,
 }) {
-  final base = DragItemWidget(
-    allowedOperations: () => [DropOperation.copy, DropOperation.move],
-    dragItemProvider: (request) async {
-      final rutas = await rutasArrastradas();
-      if (rutas.isEmpty) return null;
-      // Se entregan **referencias** al sistema: ni se copia, ni se mueve, ni
-      // se crea ningún archivo temporal. El programa de destino recibe las
-      // rutas reales y decide él qué hacer con ellas.
-      final item = DragItem(localData: rutas.join('\n'));
-      for (final r in rutas) {
-        item.add(Formats.fileUri(Uri.file(r)));
-      }
-      return item;
-    },
-    child: DraggableWidget(child: child),
-  );
+  final esDisco = esUnidadODisco(fila.fullPath);
+
+  final base = esDisco
+      ? child
+      : DragItemWidget(
+          allowedOperations: () => [DropOperation.copy, DropOperation.move],
+          dragItemProvider: (request) async {
+            final rutas = await rutasArrastradas();
+            if (rutas.isEmpty) return null;
+            final item = DragItem(localData: rutas.join('\n'));
+            for (final r in rutas) {
+              item.add(Formats.fileUri(Uri.file(r)));
+            }
+            item.add(Formats.plainText(rutas.join('\n')));
+            return item;
+          },
+          child: DraggableWidget(
+            onDragConfiguration: (config, session) async {
+              final rutas = await rutasArrastradas();
+              if (rutas.isEmpty) return null;
+              final snapshot = config.items.isNotEmpty ? config.items.first.image : null;
+              if (snapshot == null) return config;
+
+              final items = <DragConfigurationItem>[];
+              for (final r in rutas) {
+                final item = DragItem(localData: r);
+                item.add(Formats.fileUri(Uri.file(r)));
+                item.add(Formats.plainText(r));
+                items.add(DragConfigurationItem(item: item, image: snapshot));
+              }
+              return DragConfiguration(
+                items: items,
+                allowedOperations: config.allowedOperations,
+              );
+            },
+            child: child,
+          ),
+        );
 
   final soltar = onSoltarEnCarpeta;
   if (fila.isDirectory && soltar != null) {
     return DropRegion(
-      formats: const [],
+      formats: kFileDropFormats,
       onDropOver: (event) async {
-        final local = event.session.items.isEmpty
-            ? null
-            : event.session.items.first.localData;
-        if (local is String && local.trim().isNotEmpty) {
-          return DropOperation.move;
+        if (dropSessionTieneArchivos(event.session)) {
+          return DropOperation.copy;
         }
         return DropOperation.none;
       },
       onPerformDrop: (event) async {
-        final local = event.session.items.isEmpty
-            ? null
-            : event.session.items.first.localData;
-        if (local is String) {
-          final rutas = local
-              .split('\n')
-              .map((r) => r.trim())
-              .where((r) => r.isNotEmpty)
-              .toList();
+        final rutas = await extraerRutasDeDropSession(event.session);
+        if (rutas.isNotEmpty) {
           soltar(rutas, fila.fullPath);
         }
       },
@@ -562,8 +721,8 @@ class _CasillaIcono extends StatelessWidget {
   const _CasillaIcono({
     required this.fila,
     required this.seleccionada,
-    required this.onTap,
-    required this.onDoubleTap,
+    this.cortada = false,
+    required this.onTapDown,
     required this.onContextMenu,
     required this.rutasArrastradas,
     this.onSoltarEnCarpeta,
@@ -571,63 +730,69 @@ class _CasillaIcono extends StatelessWidget {
 
   final FileRow fila;
   final bool seleccionada;
-  final VoidCallback onTap;
-  final VoidCallback onDoubleTap;
+  final bool cortada;
+  final VoidCallback onTapDown;
   final void Function(Offset) onContextMenu;
   final Future<List<String>> Function() rutasArrastradas;
   final void Function(List<String> rutas, String destino)? onSoltarEnCarpeta;
 
   @override
   Widget build(BuildContext context) {
-    final contenedor = GestureDetector(
-      onTap: onTap,
-      onDoubleTap: onDoubleTap,
-      onSecondaryTapDown: (d) => onContextMenu(d.globalPosition),
-      child: Container(
-        decoration: BoxDecoration(
-          color: seleccionada ? AppColors.selected : AppColors.rowOdd,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: seleccionada ? AppColors.primary : AppColors.border,
-            width: seleccionada ? 1.5 : 1,
+    final tarjeta = Container(
+      decoration: BoxDecoration(
+        color: seleccionada ? AppColors.selected : AppColors.rowOdd,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: seleccionada ? AppColors.primary : AppColors.border,
+          width: seleccionada ? 1.5 : 1,
+        ),
+      ),
+      padding: const EdgeInsets.all(8),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            fila.isDirectory ? Icons.folder_rounded : iconoExtension(fila.extension),
+            size: 36,
+            color: fila.isDirectory
+                ? const Color(0xFFE5A93C)
+                : AppColors.primary,
           ),
-        ),
-        padding: const EdgeInsets.all(8),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              fila.isDirectory ? Icons.folder_rounded : iconoExtension(fila.extension),
-              size: 36,
-              color: fila.isDirectory
-                  ? const Color(0xFFE5A93C)
-                  : AppColors.primary,
+          const SizedBox(height: 6),
+          Text(
+            fila.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 11,
+              height: 1.2,
+              fontWeight: seleccionada ? FontWeight.w600 : FontWeight.w400,
+              color: fila.isDisconnected
+                  ? AppColors.textDisabled
+                  : AppColors.textPrimary,
             ),
-            const SizedBox(height: 6),
-            Text(
-              fila.name,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                fontSize: 11,
-                height: 1.2,
-                fontWeight: seleccionada ? FontWeight.w600 : FontWeight.w400,
-                color: fila.isDisconnected
-                    ? AppColors.textDisabled
-                    : AppColors.textPrimary,
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
 
-    return envolverConArrastre(
-      child: contenedor,
-      fila: fila,
-      rutasArrastradas: rutasArrastradas,
-      onSoltarEnCarpeta: onSoltarEnCarpeta,
+    final Widget widgetTarjeta = cortada
+        ? Opacity(opacity: 0.5, child: tarjeta)
+        : tarjeta;
+
+    return RepaintBoundary(
+      child: envolverConArrastre(
+        fila: fila,
+        rutasArrastradas: rutasArrastradas,
+        onSoltarEnCarpeta: onSoltarEnCarpeta,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => onTapDown(),
+          onSecondaryTapDown: (d) => onContextMenu(d.globalPosition),
+          child: widgetTarjeta,
+        ),
+      ),
     );
   }
 }
@@ -656,8 +821,8 @@ class _Fila extends StatelessWidget {
     required this.viewMode,
     required this.mostrarRuta,
     required this.seleccionada,
-    required this.onTap,
-    required this.onDoubleTap,
+    this.cortada = false,
+    required this.onTapDown,
     required this.onContextMenu,
     required this.rutasArrastradas,
     this.onSoltarEnCarpeta,
@@ -668,8 +833,8 @@ class _Fila extends StatelessWidget {
   final ResultViewMode viewMode;
   final bool mostrarRuta;
   final bool seleccionada;
-  final VoidCallback onTap;
-  final VoidCallback onDoubleTap;
+  final bool cortada;
+  final VoidCallback onTapDown;
   final void Function(Offset) onContextMenu;
   final Future<List<String>> Function() rutasArrastradas;
 
@@ -690,30 +855,36 @@ class _Fila extends StatelessWidget {
         ? Colors.white.withAlpha(200)
         : (fila.isDisconnected ? AppColors.textDisabled : AppColors.textSecondary);
 
-    return envolverConArrastre(
-      fila: fila,
-      rutasArrastradas: rutasArrastradas,
-      onSoltarEnCarpeta: onSoltarEnCarpeta,
-      child: GestureDetector(
-        onTap: onTap,
-        onDoubleTap: onDoubleTap,
-        onSecondaryTapDown: (d) => onContextMenu(d.globalPosition),
-        child: Container(
-          height: viewMode == ResultViewMode.compact ? 24.0 : 32.0,
-          color: fondo,
-          padding: EdgeInsets.symmetric(
-            horizontal: viewMode == ResultViewMode.compact ? 8 : 16,
-          ),
-          child: Row(
-            children: switch (viewMode) {
-              ResultViewMode.details => _celdasDetalle(colorTexto, colorSecundario),
-              ResultViewMode.list => _celdasLista(colorTexto, colorSecundario),
-              ResultViewMode.compact => _celdasCompacta(colorTexto, colorSecundario),
-              // Las tarjetas usan `_CasillaIcono`; esta rama es solo para que
-              // el `switch` siga siendo exhaustivo.
-              ResultViewMode.grid => _celdasCompacta(colorTexto, colorSecundario),
-            },
-          ),
+    Widget filaWidget = Container(
+      height: viewMode == ResultViewMode.compact ? 24.0 : 32.0,
+      color: fondo,
+      padding: EdgeInsets.symmetric(
+        horizontal: viewMode == ResultViewMode.compact ? 8 : 16,
+      ),
+      child: Row(
+        children: switch (viewMode) {
+          ResultViewMode.details => _celdasDetalle(colorTexto, colorSecundario),
+          ResultViewMode.list => _celdasLista(colorTexto, colorSecundario),
+          ResultViewMode.compact => _celdasCompacta(colorTexto, colorSecundario),
+          ResultViewMode.grid => _celdasCompacta(colorTexto, colorSecundario),
+        },
+      ),
+    );
+
+    if (cortada) {
+      filaWidget = Opacity(opacity: 0.5, child: filaWidget);
+    }
+
+    return RepaintBoundary(
+      child: envolverConArrastre(
+        fila: fila,
+        rutasArrastradas: rutasArrastradas,
+        onSoltarEnCarpeta: onSoltarEnCarpeta,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) => onTapDown(),
+          onSecondaryTapDown: (d) => onContextMenu(d.globalPosition),
+          child: filaWidget,
         ),
       ),
     );
@@ -869,33 +1040,66 @@ class _EstadoVacio extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final salud = estado.engine;
-
-    if (!salud.isOpen) {
-      final avisa = salud.problem.resolvesItself;
-      return _mensaje(
-        icono: avisa ? Icons.sync : Icons.error_outline,
-        color: avisa ? Colors.orange : Colors.red,
-        titulo: salud.shortLabel,
-        detalle: salud.detail,
-      );
-    }
-
-    if (estado.query.isEmpty && estado.mode == ViewMode.search) {
-      return _mensaje(
-        icono: Icons.search_rounded,
-        color: AppColors.primary.withAlpha(80),
-        titulo: 'Empieza a escribir para buscar',
-        detalle:
-            '${_conPuntos(salud.entryCount)} elementos indexados y listos.',
-      );
-    }
-
     if (estado.mode == ViewMode.browse) {
       return _mensaje(
         icono: Icons.folder_open_rounded,
         color: AppColors.primary.withAlpha(80),
         titulo: 'Esta carpeta está vacía',
-        detalle: estado.browsePath,
+        detalle: estado.browsePath.isEmpty ? 'No hay elementos para mostrar' : estado.browsePath,
+      );
+    }
+
+    if (!salud.isOpen || salud.entryCount == 0) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 48),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 36,
+                height: 36,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3,
+                  color: AppColors.primary,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Text(
+                estado.query.isEmpty
+                    ? 'Indexando tu equipo por primera vez…'
+                    : 'Indexando equipo… buscando «${estado.query}»',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                estado.query.isEmpty
+                    ? 'BDJ Studio Search Pro está catalogando tus archivos en segundo plano para habilitar búsquedas instantáneas a 0 ms.\nEsto solo se realiza la primera vez y toma unos momentos.'
+                    : 'El índice se está generando en segundo plano. En cuanto finalice, tus resultados aparecerán aquí automáticamente.',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  color: AppColors.textSecondary,
+                  height: 1.45,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (estado.query.isEmpty) {
+      return _mensaje(
+        icono: Icons.search_rounded,
+        color: AppColors.primary.withAlpha(80),
+        titulo: 'Empieza a escribir para buscar',
+        detalle: '${_conPuntos(salud.entryCount)} elementos indexados y listos.',
       );
     }
 

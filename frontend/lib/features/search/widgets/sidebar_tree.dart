@@ -1,13 +1,30 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:super_drag_and_drop/super_drag_and_drop.dart';
+import '../../../core/i18n/app_strings.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/ffi/api.dart' as ffi;
+import '../../fileops/dnd_utils.dart';
 import '../../fileops/providers/file_ops_provider.dart';
+import '../models/file_row.dart';
 import '../providers/favorites_provider.dart';
-import '../providers/recent_folders_provider.dart';
 import '../providers/search_provider.dart';
+
+class _VolumenItem {
+  final String prefix;
+  final String label;
+  final bool isConnected;
+  final bool isRemovable;
+
+  const _VolumenItem({
+    required this.prefix,
+    required this.label,
+    required this.isConnected,
+    required this.isRemovable,
+  });
+}
 
 /// Panel lateral de navegación con Marcadores (favoritos) y equipo/volúmenes.
 class SidebarTree extends ConsumerStatefulWidget {
@@ -19,6 +36,7 @@ class SidebarTree extends ConsumerStatefulWidget {
 
 class _SidebarTreeState extends ConsumerState<SidebarTree> {
   ffi.ServiceStatusFfi? _serviceStatus;
+  Timer? _pollTimer;
 
   /// Subdirectorios conocidos de cada carpeta rama del árbol (carga perezosa).
   final Map<String, List<String>> _subdirs = {};
@@ -30,6 +48,17 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
   void initState() {
     super.initState();
     _loadServiceStatus();
+    _pollTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (mounted) {
+        _loadServiceStatus();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadServiceStatus() async {
@@ -51,33 +80,27 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
   Future<void> _moverSoltados(List<String> rutas, String destino) async {
     if (rutas.isEmpty || destino.isEmpty) return;
     if (rutas.contains(destino)) return;
+    final filtradas = rutas.where((r) => !esUnidadODisco(r)).toList();
+    if (filtradas.isEmpty) return;
+
     final ops = ref.read(fileOpsProvider.notifier);
-    await ops.moveTo(rutas, destino);
+    await ops.moveTo(filtradas, destino);
+    await ref.read(searchProvider.notifier).refreshAfterFileOperation();
   }
 
   /// Envuelve una carpeta del árbol lateral para aceptar sueltas (mover).
   Widget _aceptaSuelta(Widget child, String destino) {
     return DropRegion(
-      formats: const [],
+      formats: kFileDropFormats,
       onDropOver: (event) async {
-        final local = event.session.items.isEmpty
-            ? null
-            : event.session.items.first.localData;
-        if (local is String && local.trim().isNotEmpty) {
+        if (dropSessionTieneArchivos(event.session)) {
           return DropOperation.move;
         }
         return DropOperation.none;
       },
       onPerformDrop: (event) async {
-        final local = event.session.items.isEmpty
-            ? null
-            : event.session.items.first.localData;
-        if (local is String) {
-          final rutas = local
-              .split('\n')
-              .map((r) => r.trim())
-              .where((r) => r.isNotEmpty)
-              .toList();
+        final rutas = await extraerRutasDeDropSession(event.session);
+        if (rutas.isNotEmpty) {
           await _moverSoltados(rutas, destino);
         }
       },
@@ -95,6 +118,14 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
       List<String> hijos;
       try {
         hijos = await ffi.browseSubdirs(path: path);
+        if (hijos.isEmpty && Directory(path).existsSync()) {
+          hijos = Directory(path)
+              .listSync(followLinks: false)
+              .whereType<Directory>()
+              .map((d) => d.path)
+              .toList()
+            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+        }
       } catch (_) {
         hijos = const [];
       }
@@ -195,12 +226,10 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
 
   @override
   Widget build(BuildContext context) {
-    final searchState = ref.watch(searchProvider);
+    final browsePath = ref.watch(searchProvider.select((s) => s.browsePath));
     final notifier = ref.read(searchProvider.notifier);
     final favorites = ref.watch(favoritesProvider);
     final favoritesNotifier = ref.read(favoritesProvider.notifier);
-    final recentFolders = ref.watch(recentFoldersProvider);
-    final serviceStatus = _serviceStatus;
 
     return Container(
       width: 220,
@@ -214,11 +243,11 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
           padding: const EdgeInsets.symmetric(vertical: 4),
           children: [
           // Encabezado de Acceso Rápido
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Text(
-              'ACCESO RÁPIDO',
-              style: TextStyle(
+              AppStrings.quickAccess,
+              style: const TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
                 color: AppColors.textSecondary,
@@ -226,8 +255,8 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             ),
           ),
           ..._obtenerAccesosRapidos().map((item) {
-            final isSelected = searchState.browsePath == item.ruta ||
-                (searchState.browsePath.startsWith(item.ruta) &&
+            final isSelected = browsePath == item.ruta ||
+                (browsePath.startsWith(item.ruta) &&
                     item.ruta.endsWith(Platform.pathSeparator));
             return _aceptaSuelta(
               ListTile(
@@ -257,20 +286,25 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'MIS MARCADORES',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textSecondary,
+                Expanded(
+                  child: Text(
+                    AppStrings.myBookmarks,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textSecondary,
+                    ),
                   ),
                 ),
                 IconButton(
+                  padding: const EdgeInsets.all(4),
+                  constraints: const BoxConstraints(),
                   icon: const Icon(Icons.add,
                       size: 16, color: AppColors.textSecondary),
                   onPressed: () {
-                    if (searchState.browsePath.isNotEmpty) {
-                      favoritesNotifier.add(searchState.browsePath);
+                    if (browsePath.isNotEmpty) {
+                      favoritesNotifier.add(browsePath);
                     }
                   },
                   tooltip: 'Añadir carpeta actual',
@@ -279,7 +313,7 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             ),
           ),
           ...favorites.map((path) {
-            final isSelected = searchState.browsePath == path;
+            final isSelected = browsePath == path;
             final name = path
                 .split(RegExp(r'[\\/]'))
                 .lastWhere((s) => s.isNotEmpty, orElse: () => path);
@@ -311,75 +345,14 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             );
           }),
 
-          if (recentFolders.isNotEmpty) ...[
-            const Divider(height: 16, color: AppColors.border),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'CARPETAS RECIENTES',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.clear_all,
-                        size: 16, color: AppColors.textSecondary),
-                    onPressed: () =>
-                        ref.read(recentFoldersProvider.notifier).clear(),
-                    tooltip: 'Limpiar recientes',
-                  ),
-                ],
-              ),
-            ),
-            ...recentFolders.take(5).map((path) {
-              final isSelected = searchState.browsePath == path ||
-                  (searchState.browsePath.startsWith(path) && path.endsWith('\\'));
-              final name = (path.endsWith(':\\') ||
-                      path.endsWith(':/') ||
-                      RegExp(r'^[a-zA-Z]:$').hasMatch(path))
-                  ? 'Disco local (${path.replaceAll('\\', '').replaceAll('/', '')})'
-                  : path
-                      .split(RegExp(r'[\\/]'))
-                      .lastWhere((s) => s.isNotEmpty, orElse: () => path);
-              return _aceptaSuelta(
-                ListTile(
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  leading: const Icon(Icons.history_rounded,
-                      size: 16, color: AppColors.textSecondary),
-                  title: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight:
-                          isSelected ? FontWeight.bold : FontWeight.normal,
-                      color: isSelected
-                          ? AppColors.primary
-                          : AppColors.textPrimary,
-                    ),
-                  ),
-                  onTap: () => notifier.openFolder(path),
-                ),
-                path,
-              );
-            }),
-          ],
-
           const Divider(height: 16, color: AppColors.border),
 
           // Encabezado de Volúmenes y Carpetas
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             child: Text(
-              'EQUIPO Y VOLÚMENES',
-              style: TextStyle(
+              AppStrings.drivesAndVolumes,
+              style: const TextStyle(
                 fontSize: 11,
                 fontWeight: FontWeight.bold,
                 color: AppColors.textSecondary,
@@ -387,29 +360,109 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
             ),
           ),
 
-          if (serviceStatus != null)
-            for (var i = 0; i < serviceStatus.volumePrefixes.length; i++)
-              ..._raizVolumen(i, serviceStatus),
+          for (final vol in _obtenerVolumenes())
+            ..._raizVolumen(vol),
         ],
       ),
     ),
   );
 }
 
+  List<_VolumenItem> _obtenerVolumenes() {
+    final Map<String, _VolumenItem> map = {};
+
+    // 1. Volúmenes reportados por el motor de indexación
+    if (_serviceStatus != null) {
+      for (var i = 0; i < _serviceStatus!.volumePrefixes.length; i++) {
+        final prefix = _serviceStatus!.volumePrefixes[i];
+        final label = i < _serviceStatus!.volumeLabels.length ? _serviceStatus!.volumeLabels[i] : prefix;
+        final isConnected = i < _serviceStatus!.volumeConnected.length ? _serviceStatus!.volumeConnected[i] : true;
+        map[prefix.toLowerCase()] = _VolumenItem(
+          prefix: prefix,
+          label: label.isEmpty ? prefix : label,
+          isConnected: isConnected,
+          isRemovable: false,
+        );
+      }
+    }
+
+    // 2. Detección directa en caliente en el SO (USBs, discos extraíbles, etc.)
+    if (Platform.isWindows) {
+      for (var c = 65; c <= 90; c++) {
+        final letter = String.fromCharCode(c);
+        final drivePath = '$letter:\\';
+        try {
+          if (Directory(drivePath).existsSync()) {
+            final key = drivePath.toLowerCase();
+            final yaEsta = map.containsKey(key);
+            final esRemovible = c > 67; // D: en adelante suele ser secundario/USB
+            if (!yaEsta) {
+              map[key] = _VolumenItem(
+                prefix: drivePath,
+                label: 'Unidad $letter:',
+                isConnected: true,
+                isRemovable: esRemovible,
+              );
+            } else if (esRemovible) {
+              // Marcar como extraíble para mostrar el icono USB
+              map[key] = _VolumenItem(
+                prefix: map[key]!.prefix,
+                label: map[key]!.label,
+                isConnected: map[key]!.isConnected,
+                isRemovable: true,
+              );
+            }
+          }
+        } catch (_) {}
+      }
+    } else if (Platform.isMacOS) {
+      if (!map.containsKey('/')) {
+        map['/'] = const _VolumenItem(
+          prefix: '/',
+          label: 'Macintosh HD',
+          isConnected: true,
+          isRemovable: false,
+        );
+      }
+      try {
+        final volumesDir = Directory('/Volumes');
+        if (volumesDir.existsSync()) {
+          for (final entity in volumesDir.listSync()) {
+            if (entity is Directory) {
+              final path = entity.path;
+              final name = path.split('/').last;
+              if (name.isNotEmpty && !name.startsWith('.')) {
+                map[path.toLowerCase()] = _VolumenItem(
+                  prefix: path,
+                  label: name,
+                  isConnected: true,
+                  isRemovable: true,
+                );
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    return map.values.toList();
+  }
+
   /// La rama raíz de un volumen: su propia fila y, al expandirla, el árbol de
   /// carpetas que cuelga de ella.
-  List<Widget> _raizVolumen(int index, ffi.ServiceStatusFfi status) {
-    final prefix = status.volumePrefixes[index];
-    final label = index < status.volumeLabels.length
-        ? status.volumeLabels[index]
-        : prefix;
-    final isConnected = index < status.volumeConnected.length
-        ? status.volumeConnected[index]
-        : true;
-    final searchState = ref.read(searchProvider);
-    final isSelected = searchState.browsePath == prefix;
+  List<Widget> _raizVolumen(_VolumenItem item) {
+    final prefix = item.prefix;
+    final label = item.label;
+    final isConnected = item.isConnected;
+    final isRemovable = item.isRemovable;
+    final browsePath = ref.watch(searchProvider.select((s) => s.browsePath));
+    final isSelected = browsePath == prefix;
 
     final expandida = _expandidas.contains(prefix);
+    final icono = isRemovable
+        ? Icons.usb_rounded
+        : (isConnected ? Icons.dns_rounded : Icons.disc_full_outlined);
+
     final raiz = _aceptaSuelta(
       InkWell(
         onTap: isConnected
@@ -428,14 +481,16 @@ class _SidebarTreeState extends ConsumerState<SidebarTree> {
                 ),
               ),
               Icon(
-                isConnected ? Icons.dns : Icons.disc_full_outlined,
+                icono,
                 size: 16,
-                color: isConnected ? AppColors.primary : AppColors.textSecondary,
+                color: isConnected
+                    ? (isRemovable ? const Color(0xFF00B4D8) : AppColors.primary)
+                    : AppColors.textSecondary,
               ),
               const SizedBox(width: 6),
               Expanded(
                 child: Text(
-                  '$label ($prefix)',
+                  label == prefix ? prefix : '$label ($prefix)',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(

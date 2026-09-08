@@ -399,7 +399,7 @@ impl OverlayIndex {
                     (view.flags[idx] & FLAG_HIDDEN) != 0,
                     (view.flags[idx] & FLAG_SYSTEM) != 0,
                     view.volume[idx],
-                    view.size[idx],
+                    view.size_of(idx),
                     view.mtime[idx],
                     view.ctime[idx],
                 );
@@ -427,7 +427,9 @@ impl OverlayIndex {
                 (self.builder.flags[idx] & FLAG_HIDDEN) != 0,
                 (self.builder.flags[idx] & FLAG_SYSTEM) != 0,
                 self.builder.volumes[idx],
-                self.builder.sizes[idx],
+                // Por la tabla aparte: la columna puede llevar la marca en vez
+                // del tamaño real cuando el archivo pasa de 4 GiB.
+                self.builder.size_at(idx as u32),
                 self.builder.mtimes[idx],
                 self.builder.ctimes[idx],
             );

@@ -72,8 +72,16 @@ flutter build macos --release
 
 echo "== 4/4 Copiando librerias nativas dentro del bundle =="
 stop_stale_indexers
-copy_libs_into "build/macos/Build/Products/Release/$APP_NAME/Contents/MacOS"
-copy_libs_into "build/macos/Build/Products/Debug/$APP_NAME/Contents/MacOS"
+for profile in Release Debug; do
+  APP_BUNDLE="$(find "$FRONTEND/build/macos/Build/Products/$profile" -maxdepth 1 -type d -name '*.app' -print -quit 2>/dev/null || true)"
+  if [ -n "$APP_BUNDLE" ]; then
+    mkdir -p "$APP_BUNDLE/Contents/Frameworks" "$APP_BUNDLE/Contents/MacOS"
+    cp "$ENGINE/target/release/libbdj_search_ffi.dylib" "$APP_BUNDLE/Contents/Frameworks/" 2>/dev/null || true
+    cp "$ENGINE/target/release/libbdj_search_ffi.dylib" "$APP_BUNDLE/Contents/MacOS/"
+    cp "$ENGINE/target/release/bdj_search_indexer" "$APP_BUNDLE/Contents/MacOS/"
+    echo "  -> ok en $APP_BUNDLE"
+  fi
+done
 
 echo ""
 echo "Listo. El .app lleva libbdj_search_ffi.dylib y el indexador dentro."

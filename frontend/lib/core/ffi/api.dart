@@ -10,6 +10,14 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 // These functions are ignored because they are not marked as `pub`: `flush_changes`, `kind_code`, `overlay_generation_on_disk`, `policy_from`, `reload_overlay`, `resolve_default_index_path`, `state_code`, `to_ffi`, `to_paths`, `tracing_no_op`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `LastQuery`
 
+/// El contrato que implementa el motor **compilado** que está cargado ahora.
+///
+/// La aplicación compara esto con el número que trae ella. Si el motor es tan
+/// viejo que ni siquiera tiene esta función, la llamada falla, que es igual de
+/// informativo: también significa que hay que recompilar.
+Future<int> apiContractVersion() =>
+    RustLib.instance.api.crateApiApiContractVersion();
+
 Future<String> ping() => RustLib.instance.api.crateApiPing();
 
 Future<void> engineOpen({required String indexPathStr}) =>

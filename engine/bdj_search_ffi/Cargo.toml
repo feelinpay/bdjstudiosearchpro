@@ -8,6 +8,21 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+# El enlazador de MSVC escribe en stdout, y desde Rust 1.87 eso es un aviso.
+#
+# Al construir una `cdylib` en Windows, `link.exe` anuncia siempre que ha creado
+# la biblioteca de importación y el objeto de exportación («Creando biblioteca
+# …dll.lib y objeto …dll.exp»). Es informativo, ocurre en cada compilación y no
+# hay forma de que no ocurra: es lo que significa producir una DLL.
+#
+# El aviso se silencia **solo en este crate**, que es el único que enlaza una
+# biblioteca dinámica. El precio de ser honesto: la regla no distingue un
+# mensaje benigno de otro que no lo sea, así que aquí se dejan de ver todos los
+# mensajes del enlazador. Un fallo de enlazado sigue siendo un error, no un
+# aviso, y ese sí se ve.
+[lints.rust]
+linker_messages = "allow"
+
 [dependencies]
 bdj_search_core = { path = "../bdj_search_core" }
 bdj_search_ipc = { path = "../bdj_search_ipc" }
@@ -15,6 +30,7 @@ bdj_search_fsops = { path = "../bdj_search_fsops" }
 flutter_rust_bridge = "=2.13.0"
 tracing = "0.1"
 parking_lot = "0.12"
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 [dev-dependencies]
 tempfile = "3.17"

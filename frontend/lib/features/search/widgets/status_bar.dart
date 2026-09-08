@@ -104,8 +104,7 @@ class _EstadoDelMotor extends StatelessWidget {
       color = Colors.red;
       icono = Icons.lock_outline;
     } else if (salud.problem.resolvesItself) {
-      // Se resuelve solo en cuanto el servicio trabaje: es un aviso, no un error.
-      color = Colors.orange;
+      color = AppColors.textSecondary;
       icono = Icons.sync;
     } else {
       color = Colors.red;

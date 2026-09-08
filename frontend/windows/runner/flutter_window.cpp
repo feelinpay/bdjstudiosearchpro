@@ -27,8 +27,18 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
-  flutter_controller_->engine()->SetNextFrameCallback([&]() {
-    this->Show();
+  bool start_hidden = false;
+  for (const auto& arg : project_.dart_entrypoint_arguments()) {
+    if (arg == "--startup" || arg == "--tray" || arg == "--minimized") {
+      start_hidden = true;
+      break;
+    }
+  }
+
+  flutter_controller_->engine()->SetNextFrameCallback([this, start_hidden]() {
+    if (!start_hidden) {
+      this->Show();
+    }
   });
 
   // Flutter can complete the first frame before the "show window" callback is

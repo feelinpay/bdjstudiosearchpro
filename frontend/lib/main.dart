@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +11,8 @@ import 'package:hotkey_manager/hotkey_manager.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'package:shared_preferences/shared_preferences.dart';
+import 'core/i18n/app_strings.dart';
 import 'core/indexador.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
@@ -21,6 +25,7 @@ import 'features/licensing/presentation/screens/activation_screen.dart';
 import 'features/licensing/presentation/screens/license_info_sheet.dart';
 import 'features/search/providers/search_provider.dart';
 import 'features/fileops/providers/file_ops_provider.dart';
+import 'features/fileops/file_ops_dialogs.dart';
 import 'features/fileops/widgets/file_ops_overlay.dart';
 import 'features/search/widgets/explorer_bar.dart';
 import 'features/search/widgets/status_bar.dart';
@@ -28,6 +33,7 @@ import 'features/search/widgets/top_menu_bar.dart';
 import 'features/search/widgets/virtualized_table.dart';
 import 'features/search/widgets/sidebar_tree.dart';
 import 'features/search/widgets/preview_pane.dart';
+import 'features/search/providers/preview_provider.dart';
 import 'core/ffi/api.dart' as ffi;
 
 String? _findProjectRoot() {
@@ -44,30 +50,32 @@ String? _findProjectRoot() {
   return null;
 }
 
-Future<bool> _compileNativeSync(String root) async {
-  try {
-    debugPrint('RustLib: ejecutando auto-sanación nativa en $root...');
-    final result = Platform.isWindows
-        ? await Process.run('powershell', [
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            '$root\\tools\\build_native.ps1',
-            '-SkipCodegen',
-          ])
-        : await Process.run('bash', ['$root/tools/build_macos.sh']);
-    return result.exitCode == 0;
-  } catch (e) {
-    debugPrint('RustLib: error durante compilación nativa: $e');
-    return false;
-  }
-}
+/// ¿Estamos dentro del árbol del proyecto, o es una instalación de verdad?
+///
+/// Cambia lo único que importa cuando el motor no carga: a quién se lo estamos
+/// contando. En el equipo de quien desarrolla, la respuesta útil son los dos
+/// comandos que hay que ejecutar. En el equipo de un DJ, hablarle de `cargo` y
+/// de «content hash» no es información: es ruido, y encima en inglés.
+bool _esEntornoDeDesarrollo() => _findProjectRoot() != null;
 
 Future<void> _initRustLib() async {
   final cwd = Directory.current.path;
   final exeDir = File(Platform.resolvedExecutable).parent.path;
 
-  // 1. Recolectar todas las rutas candidatas
+  // En modo release instalado, cargar directamente la DLL que viaja junto al ejecutable (< 1 ms).
+  final prodDll = File(Platform.isWindows
+      ? '$exeDir\\bdj_search_ffi.dll'
+      : (Platform.isMacOS ? '$exeDir/libbdj_search_ffi.dylib' : ''));
+  if (kReleaseMode && prodDll.existsSync()) {
+    try {
+      final lib = ExternalLibrary.open(prodDll.path);
+      await RustLib.init(externalLibrary: lib);
+      debugPrint('RustLib: inicializado instantáneamente desde ${prodDll.path}');
+      return;
+    } catch (_) {}
+  }
+
+  // 1. Recolectar todas las rutas candidatas (modo desarrollo)
   final candidatePaths = <String>[];
   if (Platform.isWindows) {
     candidatePaths.addAll([
@@ -146,38 +154,41 @@ Future<void> _initRustLib() async {
     }
   }
 
-  // 3. Si ninguno coincidió y estamos en entorno de desarrollo, auto-sanar compilando
-  if (!initialized) {
-    debugPrint('RustLib: ningún binario coincide con el hash. Intentando auto-sanación...');
-    final rootDir = _findProjectRoot();
-    if (rootDir != null) {
-      final compiled = await _compileNativeSync(rootDir);
-      if (compiled) {
-        final releaseDll = File(Platform.isWindows
-            ? '$rootDir\\engine\\target\\release\\bdj_search_ffi.dll'
-            : '$rootDir/engine/target/release/libbdj_search_ffi.dylib');
-        if (releaseDll.existsSync()) {
-          try {
-            final lib = ExternalLibrary.open(releaseDll.path);
-            await RustLib.init(externalLibrary: lib);
-            debugPrint('RustLib: inicializado tras auto-sanación desde ${releaseDll.path}');
-            initialized = true;
-          } catch (e) {
-            lastError = e;
-          }
-        }
-      }
-    }
-  }
-
+  // Si ninguno cargó, se acabó. **La aplicación no compila nada.**
+  //
+  // Antes lanzaba `cargo` desde aquí para «auto-sanarse». Eso está mal por tres
+  // motivos, y los tres se vieron a la vez: dejaba el arranque compilando en
+  // bucle —CPU y memoria al ochenta por ciento—, fallaba igual, y en el equipo
+  // de un usuario no puede funcionar porque ahí no hay compilador. Un programa
+  // instalado no se recompila a sí mismo; se instala bien o avisa.
   if (!initialized) {
     throw StateError('No se pudo inicializar la biblioteca nativa: $lastError');
   }
   debugPrint('RustLib: inicializado correctamente.');
 }
 
-Future<void> main() async {
+// Aquí había una comprobación de contrato propia: el motor declaraba un número
+// de versión y la aplicación lo comparaba con el suyo al arrancar.
+//
+// Sobraba. `flutter_rust_bridge` ya compara un hash del contenido de los
+// enlaces, lo hace solo y no depende de que nadie se acuerde de subir un
+// número. Mantener dos mecanismos para lo mismo es una cosa más que puede
+bool isSecondaryWindow = false;
+bool startMinimized = false;
+
+Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  isSecondaryWindow = args.contains('--new-window');
+  startMinimized = args.contains('--startup') ||
+      args.contains('--tray') ||
+      args.contains('--minimized');
+
+  // Si no es una ventana secundaria abierta desde la app, exigir instancia única.
+  if (!isSecondaryWindow && !await reclamarInstanciaUnica()) {
+    debugPrint('Ya hay una instancia de BDJ Studio Search Pro en marcha.');
+    exit(0);
+  }
 
   try {
     await _initRustLib();
@@ -200,6 +211,9 @@ Future<void> main() async {
       await windowManager.ensureInitialized();
       await windowManager.setTitle('BDJ Studio Search Pro');
       await hotKeyManager.unregisterAll();
+      if (startMinimized) {
+        await windowManager.hide();
+      }
     } catch (e) {
       debugPrint('Desktop window/hotkey manager init note: $e');
     }
@@ -218,20 +232,18 @@ class _FfiRecoveryScreen extends StatefulWidget {
 }
 
 class _FfiRecoveryScreenState extends State<_FfiRecoveryScreen> {
-  bool _sincronizando = false;
+  bool _reintentando = false;
   String? _mensaje;
 
+  /// Vuelve a intentar **cargar** el motor. No compila nada.
+  ///
+  /// Sirve para el caso real: se compiló el motor en otra ventana y se quiere
+  /// abrir sin cerrar y volver a lanzar la aplicación. Cuesta milisegundos.
   Future<void> _reintentar() async {
     setState(() {
-      _sincronizando = true;
-      _mensaje = 'Sincronizando biblioteca nativa con el motor Rust...';
+      _reintentando = true;
+      _mensaje = null;
     });
-
-    final root = _findProjectRoot();
-    if (root != null) {
-      await _compileNativeSync(root);
-    }
-
     try {
       await _initRustLib();
       if (!mounted) return;
@@ -245,22 +257,35 @@ class _FfiRecoveryScreenState extends State<_FfiRecoveryScreen> {
       }
       runApp(const ProviderScope(child: SearchProApp()));
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _sincronizando = false;
-          _mensaje = 'No se pudo sincronizar automáticamente: $e';
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _reintentando = false;
+        _mensaje = 'Sigue sin cargar. $e';
+      });
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final desarrollo = _esEntornoDeDesarrollo();
+
+    // El título y la explicación cambian según a quién se le está contando.
+    final titulo = desarrollo
+        ? 'El motor compilado no coincide con la aplicación'
+        : 'Falta un componente de la instalación';
+
+    final explicacion = desarrollo
+        ? 'Los enlaces de Dart se regeneraron después de compilar el motor, o al '
+              'revés. Compílalo en este orden y vuelve a abrir:'
+        : 'BDJ Studio Search Pro no ha podido cargar su motor de búsqueda. '
+              'Vuelve a instalar la aplicación; si el problema sigue, escríbenos '
+              'y lo resolvemos.';
+
     return Scaffold(
       backgroundColor: AppColors.surface,
       body: Center(
         child: Container(
-          width: 480,
+          width: 520,
           padding: const EdgeInsets.all(32),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -276,12 +301,15 @@ class _FfiRecoveryScreenState extends State<_FfiRecoveryScreen> {
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.sync_problem_rounded, size: 48, color: AppColors.primary),
+              const Icon(Icons.extension_off_rounded,
+                  size: 44, color: AppColors.textSecondary),
               const SizedBox(height: 16),
-              const Text(
-                'Sincronización de Componentes Requerida',
-                style: TextStyle(
+              Text(
+                titulo,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
                   fontSize: 17,
                   fontWeight: FontWeight.bold,
                   color: AppColors.textPrimary,
@@ -289,28 +317,84 @@ class _FfiRecoveryScreenState extends State<_FfiRecoveryScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                _mensaje ??
-                    'La interfaz se ha actualizado y requiere sincronizar la biblioteca binaria de Rust con el código de Dart.',
+                explicacion,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 13,
                   color: AppColors.textSecondary,
-                  height: 1.4,
+                  height: 1.45,
                 ),
               ),
-              const SizedBox(height: 24),
-              if (_sincronizando)
-                const CircularProgressIndicator(color: AppColors.primary, strokeWidth: 2.5)
+
+              // Los comandos, solo donde sirven de algo.
+              if (desarrollo) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceAlt,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: const SelectableText(
+                    'cd frontend\n'
+                    'flutter_rust_bridge_codegen generate\n'
+                    '\n'
+                    'cd ..\\engine\n'
+                    'cargo build --release',
+                    style: TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12.5,
+                      height: 1.5,
+                      color: AppColors.textPrimary,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Primero generar, después compilar: el generador escribe código '
+                  'Rust que hay que compilar a continuación.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: AppColors.textSecondary,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+
+              if (_mensaje != null) ...[
+                const SizedBox(height: 14),
+                SelectableText(
+                  _mensaje!,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 11.5, color: Colors.red),
+                ),
+              ],
+
+              const SizedBox(height: 22),
+              if (_reintentando)
+                const Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                        color: AppColors.primary, strokeWidth: 2.5),
+                  ),
+                )
               else
                 ElevatedButton.icon(
                   onPressed: _reintentar,
                   icon: const Icon(Icons.refresh_rounded, size: 18),
-                  label: const Text('Sincronizar y Abrir Aplicación'),
+                  label: Text(desarrollo
+                      ? 'Ya lo he compilado, reintentar'
+                      : 'Reintentar'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primary,
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(6)),
                   ),
                 ),
             ],
@@ -350,51 +434,20 @@ class LicenseGate extends ConsumerStatefulWidget {
 
 class _LicenseGateState extends ConsumerState<LicenseGate>
     with WidgetsBindingObserver {
-  /// Lo mínimo que se mantiene el indicador de carga en pantalla.
-  ///
-  /// Sin esto, una licencia que se verifica muy rápido deja paso a la pantalla
-  /// principal en un par de fotogramas, tiempo en el que la barra de estado
-  /// todavía está comprobando el motor y parecería un destello de «error». Un
-  /// respiro mínimo hace que el arranque llegue ya con el veredicto del motor
-  /// encima, sin destellos.
-  static const _splashMinimo = Duration(milliseconds: 700);
-
-  /// Tiempo máximo total que el splash puede estar en pantalla.
-  ///
-  /// Aunque el motor no responda (servicio caído, WMI bloqueado, etc.) la
-  /// aplicación tiene que terminar de arrancar. Pasado este tope se cede el
-  /// control a la pantalla principal, que ya se encargará de mostrar el motivo
-  /// real del fallo en la barra de estado.
-  static const _splashTecho = Duration(milliseconds: 4500);
-
-  Timer? _splashTimer;
-  Timer? _splashTechoTimer;
-  bool _splashCumplido = false;
-
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _splashTimer = Timer(_splashMinimo, () {
-      if (mounted) setState(() => _splashCumplido = true);
-    });
-    _splashTechoTimer = Timer(_splashTecho, () {
-      if (mounted) setState(() => _splashCumplido = true);
-    });
   }
 
   @override
   void dispose() {
-    _splashTimer?.cancel();
-    _splashTechoTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Revalidación al volver del segundo plano: detecta el retroceso de reloj y
-    // las licencias caducadas sin necesidad de reiniciar la aplicación.
     if (state == AppLifecycleState.resumed) {
       final notifier = ref.read(licenseProvider.notifier);
       if (ref.read(licenseProvider).loadingState ==
@@ -404,20 +457,39 @@ class _LicenseGateState extends ConsumerState<LicenseGate>
     }
   }
 
-  /// Comunica al servicio si hay licencia y hasta cuándo.
-  ///
-  /// El servicio arranca con el sistema y puede pasar meses sin que nadie abra
-  /// la aplicación, así que no puede fiarse de su propia memoria: sin este aviso
-  /// no indexa. Es lo que cierra el agujero por el que un servicio elevado
-  /// recorría el disco entero sin comprobar nada.
-  ///
-  /// El envío **se reintenta hasta que el servicio confirma** (devuelve true):
-  /// el indexador recién lanzado primero hace su escaneo inicial y solo cuando
-  /// acaba crea el pipe. Si el aviso se manda una vez y falla en silencio, ese
-  /// daemon se queda sin licencia → su bucle no vigila ni republica →
-  /// la generación no avanza, y ningún cambio externo (ni siquiera el refresco
-  /// manual) se reflejaría. Esto es lo que rompía el «tiempo real» en la
-  /// práctica.
+  /// Persiste el estado de licencia en los ajustes compartidos del indexador
+  /// para que arranque conociendo la licencia inmediatamente sin esperar IPC.
+  Future<void> _persistirLicenciaEnSettings(bool activa, int hasta) async {
+    try {
+      final String dirPath;
+      if (Platform.isWindows) {
+        final progData = Platform.environment['ProgramData'] ?? r'C:\ProgramData';
+        dirPath = '$progData\\BDJ Studio\\Search Pro';
+      } else if (Platform.isMacOS) {
+        final home = Platform.environment['HOME'] ?? '';
+        dirPath = '$home/Library/Application Support/BDJ Studio/Search Pro';
+      } else {
+        return;
+      }
+      final dir = Directory(dirPath);
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      final file = File('$dirPath${Platform.pathSeparator}settings.json');
+      Map<String, dynamic> data = {};
+      if (file.existsSync()) {
+        try {
+          data = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+        } catch (_) {}
+      }
+      data['indexing_enabled'] = data['indexing_enabled'] ?? true;
+      data['license_active'] = activa;
+      data['license_expires_at'] = hasta;
+      file.writeAsStringSync(jsonEncode(data));
+    } catch (_) {}
+  }
+
+  /// Comunica al servicio si hay licencia y hasta cuándo (en segundo plano y sin bloquear).
   Future<void> _informarLicenciaAlServicio(LicenseState estado) async {
     if (Platform.environment.containsKey('FLUTTER_TEST')) {
       return;
@@ -428,43 +500,18 @@ class _LicenseGateState extends ConsumerState<LicenseGate>
       caduca == null ? 0 : caduca.millisecondsSinceEpoch ~/ 1000,
     );
 
-    // Tope alto: un escaneo inicial grande (millones de entradas) puede durar
-    // varios minutos en arrancar el pipe. Un intento por segundo es barato.
-    const intentosMax = 600;
-    var informado = false;
-    for (var i = 0; i < intentosMax && !informado; i++) {
-      try {
-        informado = await ffi.serviceSetLicense(active: activa, expiresAt: hasta);
-        if (!informado) {
-          await Future<void>.delayed(const Duration(seconds: 1));
-        }
-      } catch (e) {
-        debugPrint('No se pudo informar de la licencia al servicio: $e');
-        await Future<void>.delayed(const Duration(seconds: 2));
-      }
-    }
-    if (!informado) {
-      debugPrint('No se confirmó la licencia del indexador tras $intentosMax intentos.');
-    }
+    // 1. Persistencia directa en disco (leída de inmediato por el daemon al iniciar)
+    await _persistirLicenciaEnSettings(activa, hasta.toInt());
+
+    // 2. Notificación en caliente al indexador si ya tiene la tubería/socket abierta
+    try {
+      await ffi.serviceSetLicense(active: activa, expiresAt: hasta);
+    } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
     final licenseState = ref.watch(licenseProvider);
-
-    // Mientras la licencia se está validando se observa también el motor: si
-    // este ya dio un veredicto estable (índice abierto o fallo confirmado),
-    // el splash cede el control sin esperar al tiempo mínimo artificial. La
-    // barra de estado del HomeScreen ya pintará el motivo real.
-    final searchState = ref.watch(searchProvider);
-    if (licenseState.loadingState == LicenseLoadingState.licensed &&
-        !searchState.engine.isChecking &&
-        searchState.engine.isStable &&
-        !_splashCumplido) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) setState(() => _splashCumplido = true);
-      });
-    }
 
     ref.listen(licenseProvider, (anterior, actual) {
       if (anterior?.loadingState != actual.loadingState ||
@@ -478,17 +525,10 @@ class _LicenseGateState extends ConsumerState<LicenseGate>
       case LicenseLoadingState.loading:
         return const _SplashScreen();
       case LicenseLoadingState.licensed:
-        // La comprobación del motor ocurre al construirse la pantalla
-        // principal; se espera el respiro mínimo para no destellar estados
-        // transitorios durante el primer fotograma.
-        return _splashCumplido
-            ? const SearchHomeScreen()
-            : const _SplashScreen();
+        return const SearchHomeScreen();
       case LicenseLoadingState.unlicensed:
       case LicenseLoadingState.error:
-        return _splashCumplido
-            ? const ActivationScreen()
-            : const _SplashScreen();
+        return const ActivationScreen();
     }
   }
 }
@@ -547,13 +587,83 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
   /// repintado, ninguno liberado.
   final FocusNode _keyboardFocusNode = FocusNode();
   bool _isDragging = false;
+  List<String> _recentSearches = [];
+  bool _showRecentSearches = false;
 
   @override
   void initState() {
     super.initState();
     trayManager.addListener(this);
     windowManager.addListener(this);
+    registrarActivadorInstancia(() {
+      if (mounted) {
+        _mostrarVentana();
+      }
+    });
     _initDesktopServices();
+    _setupRecentSearches();
+    if (startMinimized) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        try {
+          await windowManager.hide();
+        } catch (_) {}
+      });
+    }
+  }
+
+  void _setupRecentSearches() {
+    _loadRecentSearches();
+    _searchFocusNode.addListener(() {
+      final shouldShow = _searchFocusNode.hasFocus &&
+          _queryController.text.trim().isEmpty &&
+          _recentSearches.isNotEmpty;
+      if (_showRecentSearches != shouldShow && mounted) {
+        setState(() => _showRecentSearches = shouldShow);
+      }
+    });
+    _queryController.addListener(() {
+      final shouldShow = _searchFocusNode.hasFocus &&
+          _queryController.text.trim().isEmpty &&
+          _recentSearches.isNotEmpty;
+      if (_showRecentSearches != shouldShow && mounted) {
+        setState(() => _showRecentSearches = shouldShow);
+      }
+    });
+  }
+
+  Future<void> _loadRecentSearches() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (mounted) {
+        setState(() {
+          _recentSearches = prefs.getStringList('recent_searches') ?? [];
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _addRecentSearch(String q) async {
+    final term = q.trim();
+    if (term.isEmpty || term.length < 2) return;
+    _recentSearches.remove(term);
+    _recentSearches.insert(0, term);
+    if (_recentSearches.length > 8) {
+      _recentSearches = _recentSearches.sublist(0, 8);
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('recent_searches', _recentSearches);
+    } catch (_) {}
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _clearRecentSearches() async {
+    _recentSearches.clear();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('recent_searches');
+    } catch (_) {}
+    if (mounted) setState(() => _showRecentSearches = false);
   }
 
   @override
@@ -568,12 +678,28 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
 
   @override
   void onWindowClose() {
-    // Cuando el usuario le da a la 'X', ocultamos en vez de salir.
-    windowManager.hide();
+    if (isSecondaryWindow) {
+      windowManager.destroy();
+    } else {
+      // Cuando el usuario le da a la 'X' en la ventana principal, ocultamos a la bandeja.
+      windowManager.hide();
+    }
+  }
+
+  @override
+  void onWindowBlur() {
+    // Al perder el foco (hacer clic en otra ventana o en el escritorio),
+    // cualquier menú contextual emergente se cierra de inmediato como en el SO nativo.
+    VirtualizedTable.dismissActiveMenu();
   }
 
   Future<void> _initDesktopServices() async {
     if (!Platform.isWindows && !Platform.isMacOS && !Platform.isLinux) return;
+    if (isSecondaryWindow) {
+      // Las ventanas secundarias solo gestionan su propia ventana y no duplican bandejas ni atajos.
+      await windowManager.setPreventClose(false);
+      return;
+    }
 
     try {
       // Atajo global: Alt + Espacio para invocar Search Pro al primer plano
@@ -604,7 +730,7 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
         items: [
           MenuItem(
             key: 'show_window',
-            label: 'Abrir BDJ Studio Search Pro',
+            label: 'Mostrar aplicación',
           ),
           MenuItem.separator(),
           MenuItem(
@@ -613,27 +739,51 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
           ),
         ],
       );
-      await trayManager.setContextMenu(menu);
-      
+
       final String iconPath = Platform.isWindows ? 'assets/images/app_icon.ico' : 'assets/images/logo.png';
+      // CRÍTICO WINDOWS/MACOS: setIcon DEBE llamarse ANTES de setContextMenu.
+      // Si se llama setContextMenu primero, SetIcon() interno reinicializa hMenu
+      // con CreatePopupMenu() vacío y el menú contextual no aparece.
       await trayManager.setIcon(iconPath);
+      await trayManager.setContextMenu(menu);
       await windowManager.setPreventClose(true);
     } catch (e) {
       debugPrint('Tray init note: $e');
     }
   }
 
+  Future<void> _mostrarVentana() async {
+    try {
+      if (await windowManager.isMinimized()) {
+        await windowManager.restore();
+      }
+      await windowManager.show();
+      await windowManager.focus();
+      _searchFocusNode.requestFocus();
+    } catch (e) {
+      debugPrint('Error al mostrar ventana: $e');
+    }
+  }
+
   @override
   void onTrayIconMouseDown() {
-    windowManager.show();
-    windowManager.focus();
+    _mostrarVentana();
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    trayManager.popUpContextMenu();
+  }
+
+  @override
+  void onTrayIconRightMouseUp() {
+    trayManager.popUpContextMenu();
   }
 
   @override
   void onTrayMenuItemClick(MenuItem menuItem) {
     if (menuItem.key == 'show_window') {
-      windowManager.show();
-      windowManager.focus();
+      _mostrarVentana();
     } else if (menuItem.key == 'exit_app') {
       terminarApp();
     }
@@ -664,11 +814,42 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
     // prohíbe usar como caso constante un tipo que lo haga.
     final tecla = event.logicalKey;
 
-    // Si el foco está en un campo de texto (buscador, barra de ruta con el
-    // lápiz activo, un diálogo de renombrar…), los atajos de la tabla no deben
-    // secuestrarlo: Ctrl+V pega la ruta que se está escribiendo, Ctrl+C copia
-    // el texto seleccionado, las flechas mueven el cursor… Solo se reservan
-    // Esc (cerrar/limpiar), F5 (refresco) y Ctrl+F (volver al buscador).
+    // Si el foco está en la caja de búsqueda y pulsa Flecha Abajo o Intro:
+    if (_searchFocusNode.hasFocus) {
+      if (tecla == LogicalKeyboardKey.arrowDown) {
+        _searchFocusNode.unfocus();
+        if (estado.rowCount > 0) {
+          if (estado.selection.isEmpty) {
+            notifier.selectRow(0);
+          } else {
+            notifier.moveCursor(1);
+          }
+        }
+        return;
+      }
+      if (tecla == LogicalKeyboardKey.enter) {
+        final q = _queryController.text.trim();
+        final pareceRuta = q.contains(Platform.pathSeparator) ||
+            (Platform.isWindows && RegExp(r'^[A-Za-z]:').hasMatch(q)) ||
+            q == '/' || q == '~' || q.startsWith('~/') || q.startsWith('~\\');
+        if (pareceRuta) {
+          _abrirComoRutaSiLoEs(q);
+          return;
+        }
+        if (q.isNotEmpty) {
+          notifier.forceSearch(q);
+          return;
+        }
+        if (estado.rowCount > 0) {
+          if (estado.selection.isEmpty) {
+            notifier.selectRow(0);
+          }
+          notifier.openSelected();
+        }
+        return;
+      }
+    }
+
     if (_escribeEnCampoDeTexto() &&
         !(tecla == LogicalKeyboardKey.escape ||
           tecla == LogicalKeyboardKey.f5 ||
@@ -678,7 +859,18 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
 
     if (isControl) {
       if (tecla == LogicalKeyboardKey.keyN) {
-        Process.start(Platform.resolvedExecutable, []);
+        if (isShift) {
+          if (estado.mode == ViewMode.browse) {
+            nuevaCarpetaDialog(context, ops, estado.browsePath);
+          } else {
+            _aviso('Navega a una carpeta para crear una nueva dentro');
+          }
+        } else {
+          // Ctrl+N: Nueva búsqueda limpia
+          _queryController.clear();
+          notifier.setQuery('');
+          _searchFocusNode.requestFocus();
+        }
         return;
       }
       if (tecla == LogicalKeyboardKey.keyA) {
@@ -702,16 +894,18 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
       }
       if (tecla == LogicalKeyboardKey.keyF) {
         // Ctrl+F pone el cursor en la caja y nada más.
-        //
-        // Antes cambiaba de modo en el acto, así que con la caja vacía dejaba
-        // la pantalla en blanco: pulsar «buscar» te quitaba de delante el
-        // contenido de la carpeta antes de haber escrito una sola letra. El
-        // cambio de modo lo hace la primera pulsación de tecla.
         _searchFocusNode.requestFocus();
         return;
       }
       if (tecla == LogicalKeyboardKey.keyD) {
-        notifier.clearSelection();
+        if (isShift) {
+          if (estado.selection.isNotEmpty) {
+            ops.duplicateSelection();
+            _aviso('Duplicando elementos seleccionados');
+          }
+        } else {
+          notifier.clearSelection();
+        }
         return;
       }
       if (tecla == LogicalKeyboardKey.keyI) {
@@ -728,6 +922,15 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
           ops.pasteInto(estado.browsePath);
         } else {
           _aviso('Abre una carpeta para pegar dentro de ella');
+        }
+        return;
+      }
+      if (tecla == LogicalKeyboardKey.keyY) {
+        if (opsEstado.canRedo) {
+          ops.redoLast();
+          _aviso('Rehaciendo la última operación');
+        } else {
+          _aviso('No hay nada que se pueda rehacer');
         }
         return;
       }
@@ -750,6 +953,31 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
       }
     }
 
+    if (isAlt) {
+      if (tecla == LogicalKeyboardKey.arrowLeft && estado.canGoBack) {
+        notifier.goBack();
+        return;
+      }
+      if (tecla == LogicalKeyboardKey.arrowRight && estado.canGoForward) {
+        notifier.goForward();
+        return;
+      }
+      if (tecla == LogicalKeyboardKey.arrowUp && estado.mode == ViewMode.browse) {
+        notifier.goUp();
+        return;
+      }
+      if (tecla == LogicalKeyboardKey.keyP) {
+        ref.read(previewProvider.notifier).toggle();
+        return;
+      }
+    }
+
+    // F2: Cambiar nombre del elemento seleccionado
+    if (tecla == LogicalKeyboardKey.f2 && estado.selection.isNotEmpty) {
+      renombrarDialog(context, ref, ops);
+      return;
+    }
+
     // F5: refresco manual de la vista actual (también está en el menú
     // «Archivo > Actualizar»).
     if (tecla == LogicalKeyboardKey.f5) {
@@ -758,21 +986,29 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
       return;
     }
 
-    // Suprimir envía a la papelera. Nunca borra de forma definitiva, ni
-    // siquiera con Mayús: lo que se borra sin remedio no se puede deshacer, y
-    // perder una sesión de trabajo por un atajo no compensa.
-    //
-    // Se confirma igual que desde el menú: la papelera da la vuelta, pero un
-    // golpe de tecla no debe mandar el trabajo de una sesión sin preguntar.
+    // Suprimir envía a la papelera (reversible).
+    // Con Shift + Suprimir se elimina definitivamente (irreversible).
     if (tecla == LogicalKeyboardKey.delete && estado.selection.isNotEmpty) {
-      _confirmarYEnviarAPapelera(ops, estado.selection.count);
+      if (isShift) {
+        eliminarPermanentemente(context, ops, estado.selection.count);
+      } else {
+        confirmarEnviarALaPapelera(context, ops, estado.selection.count);
+      }
       return;
     }
 
     if (tecla == LogicalKeyboardKey.arrowDown) {
-      notifier.moveCursor(1, extend: isShift);
+      if (estado.selection.isEmpty) {
+        notifier.selectRow(0);
+      } else {
+        notifier.moveCursor(1, extend: isShift);
+      }
     } else if (tecla == LogicalKeyboardKey.arrowUp) {
-      notifier.moveCursor(-1, extend: isShift);
+      if (estado.selection.cursor == 0 && !isShift) {
+        _searchFocusNode.requestFocus();
+      } else {
+        notifier.moveCursor(-1, extend: isShift);
+      }
     } else if (tecla == LogicalKeyboardKey.pageDown) {
       notifier.moveCursor(20, extend: isShift);
     } else if (tecla == LogicalKeyboardKey.pageUp) {
@@ -790,6 +1026,10 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
         notifier.goUp();
       }
     } else if (tecla == LogicalKeyboardKey.escape) {
+      if (_showRecentSearches) {
+        setState(() => _showRecentSearches = false);
+        return;
+      }
       if (_queryController.text.isNotEmpty) {
         _queryController.clear();
         notifier.setQuery('');
@@ -851,43 +1091,10 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
       );
   }
 
-  Future<void> _confirmarYEnviarAPapelera(
-    FileOpsNotifier ops,
-    int cuantos,
-  ) async {
-    final confirmado = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Enviar a la papelera'),
-        content: Text(
-          cuantos == 1
-              ? '¿Enviar el elemento seleccionado a la papelera?'
-              : '¿Enviar $cuantos elementos a la papelera?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancelar'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Enviar a la papelera'),
-          ),
-        ],
-      ),
-    );
-    if (confirmado != true) return;
-    await ops.trashSelection();
-  }
 
   @override
   Widget build(BuildContext context) {
-    // Solo la carpeta abierta, no el estado entero.
-    //
-    // Observar `searchProvider` completo aquí reconstruiría toda la pantalla
-    // cada vez que la caché de filas se mueve —es decir, en cada
-    // desplazamiento—, y esta rama contiene la tabla.
-    final carpetaActual = ref.watch(searchProvider.select((s) => s.browsePath));
+
 
     // La caja de búsqueda tiene que reflejar el estado, no solo alimentarlo.
     //
@@ -911,69 +1118,150 @@ class _SearchHomeScreenState extends ConsumerState<SearchHomeScreen>
         body: Column(
           children: [
             const TopMenuBar(),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: const BoxDecoration(
-                color: AppColors.surface,
-                border: Border(bottom: BorderSide(color: AppColors.border)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.search_rounded,
-                      color: AppColors.primary, size: 22),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: TextField(
-                      controller: _queryController,
-                      focusNode: _searchFocusNode,
-                      autofocus: true,
-                      style: const TextStyle(
-                        fontSize: 15,
-                        color: AppColors.textPrimary,
-                        fontWeight: FontWeight.w500,
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  decoration: const BoxDecoration(
+                    color: AppColors.surface,
+                    border: Border(bottom: BorderSide(color: AppColors.border)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.search_rounded,
+                          color: AppColors.primary, size: 22),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _queryController,
+                          focusNode: _searchFocusNode,
+                          autofocus: true,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: AppStrings.isSpanish
+                                ? 'Buscar en todo el equipo, unidades y discos...'
+                                : 'Search across all drives and volumes...',
+                            hintStyle: const TextStyle(
+                                color: AppColors.textDisabled, fontSize: 13),
+                            border: InputBorder.none,
+                            isDense: true,
+                          ),
+                          onChanged: (val) {
+                            ref.read(searchProvider.notifier).setQuery(val);
+                          },
+                          onSubmitted: (val) {
+                            final q = val.trim();
+                            _addRecentSearch(q);
+                            setState(() => _showRecentSearches = false);
+                            final pareceRuta = q.contains(Platform.pathSeparator) ||
+                                (Platform.isWindows && RegExp(r'^[A-Za-z]:').hasMatch(q)) ||
+                                q == '/' || q == '~' || q.startsWith('~/') || q.startsWith('~\\');
+                            if (pareceRuta) {
+                              _abrirComoRutaSiLoEs(q);
+                            } else if (q.isNotEmpty) {
+                              ref.read(searchProvider.notifier).forceSearch(q);
+                            }
+                          },
+                        ),
                       ),
-                      decoration: InputDecoration(
-                        // El texto de ayuda dice **dónde** va a buscar.
-                        //
-                        // Escribir filtra la carpeta abierta, igual que en el
-                        // Explorador; si no se dice, el usuario supone que
-                        // busca en todo el equipo y no entiende por qué no
-                        // aparece un archivo que sabe que tiene.
-                        hintText: carpetaActual.isEmpty
-                            ? 'Buscar en todo el equipo '
-                                '(ej: michael jackson ext:wav tam:>10mb)...'
-                            : 'Buscar en $carpetaActual…',
-                        hintStyle: const TextStyle(
-                            color: AppColors.textDisabled, fontSize: 13),
-                        border: InputBorder.none,
-                        isDense: true,
+                      if (_queryController.text.isNotEmpty)
+                        IconButton(
+                          icon: const Icon(Icons.clear,
+                              size: 18, color: AppColors.textSecondary),
+                          onPressed: () {
+                            _queryController.clear();
+                            ref.read(searchProvider.notifier).setQuery('');
+                          },
+                        ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.verified_user_outlined,
+                            size: 18, color: AppColors.textSecondary),
+                        tooltip: 'Licencia',
+                        onPressed: () => LicenseInfoSheet.show(context),
                       ),
-                      onChanged: (val) {
-                        // Con retardo: escribir de corrido ya no lanza una
-                        // consulta por tecla.
-                        ref.read(searchProvider.notifier).setQuery(val);
-                      },
-                      onSubmitted: _abrirComoRutaSiLoEs,
+                    ],
+                  ),
+                ),
+                if (_showRecentSearches)
+                  Positioned(
+                    top: 48,
+                    left: 16,
+                    right: 16,
+                    child: Material(
+                      elevation: 12,
+                      borderRadius: BorderRadius.circular(8),
+                      color: AppColors.surfaceAlt,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppColors.border),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              child: Row(
+                                children: [
+                                  const Text(
+                                    'Búsquedas recientes',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: AppColors.textSecondary,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  InkWell(
+                                    onTap: _clearRecentSearches,
+                                    child: const Text(
+                                      'Borrar historial',
+                                      style: TextStyle(fontSize: 11, color: AppColors.primary),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const Divider(height: 1, color: AppColors.border),
+                            for (final rec in _recentSearches)
+                              InkWell(
+                                onTap: () {
+                                  _queryController.text = rec;
+                                  _queryController.selection = TextSelection.collapsed(offset: rec.length);
+                                  ref.read(searchProvider.notifier).setQuery(rec);
+                                  _addRecentSearch(rec);
+                                  setState(() => _showRecentSearches = false);
+                                },
+                                hoverColor: AppColors.hover,
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.history_rounded, size: 16, color: AppColors.textDisabled),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          rec,
+                                          style: const TextStyle(fontSize: 13, color: AppColors.textPrimary),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                  if (_queryController.text.isNotEmpty)
-                    IconButton(
-                      icon: const Icon(Icons.clear,
-                          size: 18, color: AppColors.textSecondary),
-                      onPressed: () {
-                        _queryController.clear();
-                        ref.read(searchProvider.notifier).setQuery('');
-                      },
-                    ),
-                  const SizedBox(width: 4),
-                  IconButton(
-                    icon: const Icon(Icons.verified_user_outlined,
-                        size: 18, color: AppColors.textSecondary),
-                    tooltip: 'Licencia',
-                    onPressed: () => LicenseInfoSheet.show(context),
-                  ),
-                ],
-              ),
+              ],
             ),
             Expanded(
               child: DropTarget(

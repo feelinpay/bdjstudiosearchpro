@@ -11,6 +11,7 @@ import '../providers/favorites_provider.dart';
 import '../providers/preview_provider.dart';
 import '../providers/search_provider.dart';
 import '../models/view_mode.dart';
+import '../../../core/autostart/autostart_service.dart';
 
 class TopMenuBar extends ConsumerWidget {
   const TopMenuBar({super.key});
@@ -76,7 +77,8 @@ class TopMenuBar extends ConsumerWidget {
                 menuButtonTheme: MenuButtonThemeData(
                   style: ButtonStyle(
                     visualDensity: VisualDensity.compact,
-                    padding: WidgetStateProperty.all(const EdgeInsets.symmetric(horizontal: 8, vertical: 2)),
+                    alignment: Alignment.center,
+                    padding: WidgetStateProperty.all(const EdgeInsets.symmetric(horizontal: 6, vertical: 2)),
                     textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12, fontWeight: FontWeight.w500)),
                   ),
                 ),
@@ -85,10 +87,10 @@ class TopMenuBar extends ConsumerWidget {
                 children: [
                   SubmenuButton(
           menuChildren: [
-            MenuItemButton(
-              shortcut: const SingleActivator(LogicalKeyboardKey.keyN, control: true),
-              onPressed: () => Process.start(Platform.resolvedExecutable, []),
-              child: const Text('Nueva ventana'),
+            const MenuItemButton(
+              shortcut: SingleActivator(LogicalKeyboardKey.keyN, control: true),
+              onPressed: abrirNuevaVentana,
+              child: Text('Nueva ventana'),
             ),
             const Divider(),
             MenuItemButton(
@@ -103,13 +105,27 @@ class TopMenuBar extends ConsumerWidget {
               child: const Text('Exportar...'),
             ),
             const Divider(),
+            MenuItemButton(
+              onPressed: () => ref.read(autostartProvider.notifier).toggle(),
+              leadingIcon: Icon(
+                ref.watch(autostartProvider)
+                    ? Icons.check_box_rounded
+                    : Icons.check_box_outline_blank_rounded,
+                size: 16,
+                color: ref.watch(autostartProvider)
+                    ? AppColors.primary
+                    : AppColors.textSecondary,
+              ),
+              child: const Text('Iniciar con el sistema'),
+            ),
+            const Divider(),
             const MenuItemButton(
               shortcut: SingleActivator(LogicalKeyboardKey.keyQ, control: true),
               onPressed: terminarApp,
               child: Text('Salir'),
             ),
           ],
-          child: const Text('Archivo'),
+          child: _menuLabel('Archivo'),
         ),
         SubmenuButton(
           menuChildren: [
@@ -197,7 +213,7 @@ class TopMenuBar extends ConsumerWidget {
               child: const Text('Rehacer'),
             ),
           ],
-          child: const Text('Edición'),
+          child: _menuLabel('Edición'),
         ),
         SubmenuButton(
           menuChildren: [
@@ -244,7 +260,7 @@ class TopMenuBar extends ConsumerWidget {
               child: const Text('Panel de vista previa'),
             ),
           ],
-          child: const Text('Ver'),
+          child: _menuLabel('Ver'),
         ),
         SubmenuButton(
           menuChildren: [
@@ -281,7 +297,7 @@ class TopMenuBar extends ConsumerWidget {
               child: const Text('Filtros Rápidos'),
             ),
       ],
-      child: const Text('Búsqueda'),
+      child: _menuLabel('Búsqueda'),
     ),
     SubmenuButton(
       menuChildren: [
@@ -294,7 +310,7 @@ class TopMenuBar extends ConsumerWidget {
           child: const Text('Organizar Marcadores...'),
         ),
       ],
-      child: const Text('Marcadores'),
+      child: _menuLabel('Marcadores'),
             ),
           ],
         ),
@@ -303,6 +319,15 @@ class TopMenuBar extends ConsumerWidget {
   ],
 ),
 );
+  }
+
+  static Widget _menuLabel(String texto) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 46),
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Text(texto, textAlign: TextAlign.center),
+    );
   }
 
   /// Añade la carpeta actual a los marcadores.

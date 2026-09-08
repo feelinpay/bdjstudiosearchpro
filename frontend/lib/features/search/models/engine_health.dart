@@ -92,28 +92,28 @@ class EngineHealth {
 
   /// Texto corto para la barra de estado.
   String get shortLabel {
-    if (isOpen) return 'Índice listo · gen $generation';
-    if (isChecking) return 'Arrancando el servicio de indexado…';
-    if (!isStable) {
-      // Aún dentro del periodo de gracia: el servicio puede estar arrancando
-      // y publicando el primer índice de un momento a otro. Se pinta como un
-      // aviso, no como un error.
-      return switch (problem) {
-        IndexProblem.notFound => 'Iniciando el índice por primera vez…',
-        IndexProblem.oldFormat => 'Reconstruyendo el índice…',
-        IndexProblem.corrupt => 'Reconstruyendo el índice…',
-        IndexProblem.denied => 'Sin permiso para leer el índice',
-        _ => 'Iniciando el servicio de búsqueda…',
-      };
+    if (isOpen) {
+      if (entryCount > 0) {
+        return 'Índice listo (${_formatNumber(entryCount)})';
+      }
+      return 'Indexando equipo…';
     }
+    if (isChecking) return 'Iniciando búsqueda…';
     return switch (problem) {
-      IndexProblem.notFound => 'Sin índice: el servicio no está en marcha',
-      IndexProblem.oldFormat => 'Reconstruyendo el índice…',
-      IndexProblem.corrupt => 'Índice dañado: se reconstruirá',
+      IndexProblem.notFound => 'Indexando en segundo plano…',
+      IndexProblem.oldFormat => 'Actualizando índice…',
+      IndexProblem.corrupt => 'Optimizando índice…',
       IndexProblem.denied => 'Sin permiso para leer el índice',
-      IndexProblem.none => 'Preparando el índice…',
-      IndexProblem.unknown => 'No se pudo abrir el índice',
+      IndexProblem.none => entryCount > 0 ? 'Índice listo (${_formatNumber(entryCount)})' : 'Indexando equipo…',
+      IndexProblem.unknown => 'Indexando en segundo plano…',
     };
+  }
+
+  static String _formatNumber(int number) {
+    return number.toString().replaceAllMapped(
+      RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+      (m) => '${m[1]}.',
+    );
   }
 
   EngineHealth copyWith({

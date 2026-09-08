@@ -94,7 +94,7 @@ impl<'a> RowSource<'a> {
     }
 
     pub fn size(&self, id: u32) -> u64 {
-        self.locate(id).map(|(v, i, _)| v.size[i]).unwrap_or(0)
+        self.locate(id).map(|(v, i, _)| v.size_of(i)).unwrap_or(0)
     }
 
     pub fn mtime(&self, id: u32) -> u32 {

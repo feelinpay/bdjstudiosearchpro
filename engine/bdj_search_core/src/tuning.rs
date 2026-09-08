@@ -107,10 +107,16 @@ impl Tuning {
             Tier::Mid
         };
 
-        // Siempre un núcleo libre para la interfaz. Con un solo núcleo no hay
-        // nada que repartir y la búsqueda va en el mismo, que es lo correcto:
-        // más hilos que núcleos solo añade cambios de contexto.
-        let search_threads = if cores <= 1 { 1 } else { cores - 1 };
+        // En equipos de 2 núcleos, usar ambos hilos divide el tiempo a la mitad
+        // (~73ms frente a 156ms en 3,7M) sin bloquear la interfaz gracias a los
+        // bloques pequeños (16K entradas, ~0.3ms c/u) y la cancelación inmediata.
+        // En 3+ núcleos siempre se deja uno libre para Flutter. Con 1 núcleo no
+        // hay nada que repartir.
+        let search_threads = match cores {
+            0 | 1 => 1,
+            2 => 2,
+            c => c - 1,
+        };
 
         let (chunk_size, initial_limit, cached_pages, copy_chunk) = match tier {
             Tier::Low => (16_384, 500, 5, 256 * 1024),
@@ -268,8 +274,8 @@ mod tests {
         let t = Tuning::derive(2, 8 * 1024);
         assert_eq!(t.tier, Tier::Low);
         assert_eq!(
-            t.search_threads, 1,
-            "con dos núcleos, uno tiene que quedar libre para dibujar"
+            t.search_threads, 2,
+            "con dos núcleos, ambos hilos aceleran el recorrido en paralelo"
         );
         assert_eq!(t.chunk_size, 16_384);
         assert_eq!(t.initial_limit, 500);

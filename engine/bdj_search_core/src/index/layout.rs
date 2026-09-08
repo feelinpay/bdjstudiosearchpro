@@ -13,8 +13,21 @@ pub const MAGIC: &[u8; 8] = b"BDJXIDX\0";
 ///   cincuenta mil archivos sea instantáneo y no toque el disco.
 ///
 /// Un índice de la versión 1 se rechaza al abrirlo y el servicio lo reconstruye.
-pub const CURRENT_VERSION: u32 = 2;
-pub const NUM_SECTIONS: usize = 17;
+/// Versión 3: el tamaño de archivo pasa de ocho bytes a cuatro.
+///
+/// La inmensa mayoría de los archivos ocupan menos de 4 GiB, así que guardar
+/// ocho bytes por entrada es pagar el caso raro en todas. Ahora se guardan
+/// cuatro, y los pocos que no caben van a una tabla aparte —dos secciones
+/// nuevas, `SizeBigId` y `SizeBigVal`— que se consulta por bisección.
+///
+/// Sobre diez millones de archivos son cuarenta megas menos en memoria durante
+/// el escaneo y cuarenta menos en el archivo. Lo segundo importa tanto como lo
+/// primero: un índice más pequeño se recorre más rápido, así que también acelera
+/// cada búsqueda.
+///
+/// Un índice de la versión 2 se rechaza y el servicio lo reconstruye.
+pub const CURRENT_VERSION: u32 = 3;
+pub const NUM_SECTIONS: usize = 19;
 
 /// Bytes de relleno para que la tabla de secciones ocupe un múltiplo de 64.
 const SECTION_TABLE_PADDING: usize = {
@@ -102,7 +115,17 @@ pub enum SectionId {
     /// Desplazamientos CSR: los hijos de `i` son `ChildIdx[ChildOff[i]..ChildOff[i+1]]`.
     ChildOff = 15,
     ChildIdx = 16,
+    /// Identificadores de los archivos que no caben en cuatro bytes, ordenados.
+    SizeBigId = 17,
+    /// Sus tamaños reales, en el mismo orden que `SizeBigId`.
+    SizeBigVal = 18,
 }
+
+/// Marca, en la columna de tamaños, que el valor real está en la tabla aparte.
+///
+/// Un archivo que mida exactamente esto también acaba en la tabla. Es un
+/// desperdicio de una entrada y a cambio la comprobación es una comparación.
+pub const SIZE_IN_SIDE_TABLE: u32 = u32::MAX;
 
 pub const FLAG_DIR: u8 = 0x01;
 pub const FLAG_HIDDEN: u8 = 0x02;

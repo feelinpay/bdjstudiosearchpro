@@ -11,7 +11,14 @@ los cambios de las fases 1 a 12 ya aplicados.
 
 Tres cosas han cambiado y afectan al primer arranque:
 
-**El formato del índice pasó a la versión 2.** Trae dos columnas nuevas: el rango
+**El formato del índice pasó a la versión 3.** El tamaño de archivo ocupa ahora
+cuatro bytes en vez de ocho, con una tabla aparte para los que pasan de 4 GiB.
+Sobre diez millones de archivos son cuarenta megas menos de memoria durante el
+escaneo y cuarenta menos en el archivo; lo segundo también acelera cada
+búsqueda, porque hay menos que recorrer. Un `index.bdjx` de la versión 2 se
+rechaza y se reconstruye solo.
+
+**Antes de eso, el formato ya había pasado a la versión 2.** Trae dos columnas nuevas: el rango
 alfabético de cada entrada —lo que hace que ordenar por nombre cueste lo que el
 resultado y no lo que el índice— y la lista de hijos de cada carpeta, que es lo
 que permite entrar en una carpeta sin tocar el disco. Un `index.bdjx` de la

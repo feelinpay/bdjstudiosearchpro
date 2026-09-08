@@ -65,16 +65,18 @@ pub fn scan_names_bulk(
     // `memchr2_iter` mantiene el estado del barrido vectorial entre aciertos.
     // Reiniciar la búsqueda en cada uno costaba la preparación completa: con un
     // patrón de una sola letra son decenas de millones de reinicios.
+    let is_multi_byte = plen > 1;
+    let mut last_matched = usize::MAX;
+
     for hit in memchr2_iter(needle_lo, needle_hi, region) {
         let abs = region_start + hit;
         if abs + plen > arena.len() {
             break;
         }
 
-        // Primero la comprobación barata: comparar el patrón donde ha caído el
-        // acierto. La inmensa mayoría se descarta en el segundo byte, sin tocar
-        // el cursor ni ninguna otra columna.
-        if !term.eq_at(&arena[abs..abs + plen]) {
+        // Para patrones de más de un byte, comparar el resto del patrón.
+        // Si es de un solo byte, `memchr2_iter` ya garantizó la coincidencia exacta.
+        if is_multi_byte && !term.eq_at(&arena[abs..abs + plen]) {
             continue;
         }
 
@@ -97,6 +99,11 @@ pub fn scan_names_bulk(
             break;
         }
 
+        if entry == last_matched {
+            // El patrón aparece más de una vez en el mismo nombre ya aceptado.
+            continue;
+        }
+
         let off = name_off[entry] as usize;
         let len = name_len[entry] as usize;
 
@@ -111,13 +118,10 @@ pub fn scan_names_bulk(
         if (view.flags[entry] & FLAG_NON_ASCII) != 0 {
             continue;
         }
-        if out.last() == Some(&(entry as u32)) {
-            // El patrón aparece más de una vez en el mismo nombre.
-            continue;
-        }
         if !view.is_alive(entry) {
             continue;
         }
+        last_matched = entry;
         out.push(entry as u32);
     }
 

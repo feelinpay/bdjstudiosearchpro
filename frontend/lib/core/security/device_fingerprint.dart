@@ -69,6 +69,21 @@ class DeviceFingerprint {
 
   Future<String> generate() async {
     if (_cachedFingerprint != null) return _cachedFingerprint!;
+    if (readPersisted != null) {
+      try {
+        final stored = await readPersisted!();
+        if (stored != null && stored.isNotEmpty) {
+          final record = jsonDecode(stored);
+          if (record is Map<String, dynamic>) {
+            final storedFp = record['f'];
+            if (storedFp is String && storedFp.isNotEmpty) {
+              _cachedFingerprint = storedFp;
+              return storedFp;
+            }
+          }
+        }
+      } catch (_) {}
+    }
     final result = await generateResult();
     _cachedFingerprint = await _resolvePersisted(result);
     return _cachedFingerprint!;

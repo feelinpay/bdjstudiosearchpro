@@ -156,6 +156,7 @@ dependencies = [
  "flutter_rust_bridge",
  "parking_lot",
  "tempfile",
+ "tokio",
  "tracing",
 ]
 

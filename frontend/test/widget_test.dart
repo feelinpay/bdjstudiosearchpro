@@ -1,5 +1,7 @@
 import 'package:bdj_license_core/bdj_license_core.dart';
 import 'package:bdj_studio_search_pro/core/errors/failures.dart';
+import 'package:bdj_studio_search_pro/core/licensing/license_manager.dart';
+import 'package:bdj_studio_search_pro/core/licensing/licensing_port.dart';
 import 'package:bdj_studio_search_pro/core/security/device_fingerprint.dart';
 import 'package:bdj_studio_search_pro/core/security/security_port.dart';
 import 'package:bdj_studio_search_pro/features/licensing/presentation/providers/license_providers.dart';
@@ -130,4 +132,49 @@ void main() {
       expect(find.byType(ActivationScreen), findsOneWidget);
     },
   );
+
+  testWidgets(
+    'con licencia valida almacenada, la app abre directamente SearchHomeScreen sin demoras',
+    (tester) async {
+      final storage = _InMemorySecureStorage();
+      final fakeManager = _FakeActiveLicenseManager(
+        secureStorage: storage,
+        fingerprint: _FakeDeviceFingerprint(),
+      );
+
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [
+            secureStorageProvider.overrideWithValue(storage),
+            deviceFingerprintProvider.overrideWithValue(_FakeDeviceFingerprint()),
+            licenseManagerProvider.overrideWithValue(fakeManager),
+            searchProvider.overrideWith((ref) => SearchNotifier(autoInit: false)),
+          ],
+          child: const SearchProApp(),
+        ),
+      );
+      await _pumpFrames(tester);
+
+      expect(find.byType(SearchHomeScreen), findsOneWidget);
+      expect(find.byType(ActivationScreen), findsNothing);
+    },
+  );
 }
+
+class _FakeActiveLicenseManager extends LicenseManager {
+  _FakeActiveLicenseManager({
+    required super.secureStorage,
+    required super.fingerprint,
+  });
+
+  @override
+  Future<Result<LicenseInfo>> validateLicense() async {
+    return const Right(LicenseInfo(
+      status: LicenseStatus.active,
+      licenseKey: 'SPP3-TEST-VALID-KEY',
+      deviceId: 'TEST-0000-1111-2222',
+      remainingOfflineDays: 30,
+    ));
+  }
+}
+

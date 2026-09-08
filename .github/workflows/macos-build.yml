@@ -1,67 +1,229 @@
-name: macOS Build & CI
+﻿name: Build macOS
+
+# ============================================================
+# MODELO DE DISTRIBUCIÓN: DIRECTA Y FUERA DE TIENDAS
+# ============================================================
+# Todo el ecosistema BDJ Studio se distribuye directamente por el desarrollador.
+# Genera exclusivamente artefactos para distribución directa: GitHub Actions Artifacts y Releases.
+# Genera 2 ejecutables/paquetes independientes: Apple Silicon (arm64) e Intel (x64).
 
 on:
   push:
-    branches: [ main, master, 'cierre/**', 'feat/**', 'fix/**' ]
-  pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-macos:
-    runs-on: macos-15
+    name: Build macOS (${{ matrix.architecture }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+            rust_target: aarch64-apple-darwin
+          - architecture: x64
+            runner: macos-15-intel
+            rust_target: x86_64-apple-darwin
 
     steps:
-      - name: Checkout Search Pro
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Checkout bdj_license_core
+      - name: Checkout bdj_license_core (dzapataba/bdjstudiolicensecore)
         uses: actions/checkout@v4
         with:
           repository: dzapataba/bdjstudiolicensecore
-          token: ${{ secrets.CORE_TOKEN }}
-          path: ../bdj_license_core
+          path: bdj_license_core
+          token: ${{ secrets.CORE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin, x86_64-apple-darwin
+          targets: ${{ matrix.rust_target }}
           components: clippy
 
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
           cache: true
+
+      - name: Show environment
+        run: |
+          flutter --version
+          cargo --version
+          rustc --version
+          xcodebuild -version
+          uname -m
+
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
 
       - name: Install flutter_rust_bridge_codegen
         run: cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
 
+      - name: Link bdj_license_core and Install Flutter dependencies
+        run: |
+          mkdir -p ../../bdj_license_core 2>/dev/null || true
+          cp -R bdj_license_core/* ../../bdj_license_core/ 2>/dev/null || cp -R "$GITHUB_WORKSPACE/bdj_license_core"/* ../../bdj_license_core/ || true
+          cd frontend
+          flutter pub get
+
+      - name: Regenerate Flutter-Rust Bridge
+        run: |
+          cd frontend
+          flutter_rust_bridge_codegen generate
+
       - name: Run Engine Tests & Clippy
         run: |
           cd engine
-          cargo test --workspace --release
-          cargo clippy --workspace -- -D warnings
+          cargo test --workspace --release --target ${{ matrix.rust_target }}
+          cargo clippy --workspace --target ${{ matrix.rust_target }} -- -D warnings
+
+      - name: Compile Native Engine in Release (${{ matrix.architecture }})
+        run: |
+          cd engine
+          cargo build --release --target ${{ matrix.rust_target }} -p bdj_search_ffi -p bdj_search_indexer
 
       - name: Run Flutter Analyze & Tests
         run: |
           cd frontend
-          flutter pub get
           flutter analyze
           flutter test
 
-      - name: Generate FFI bridge & Build macOS Release
-        run: bash tools/build_macos.sh
+      - name: Build macOS Application (Release)
+        run: |
+          cd frontend
+          flutter build macos --release
+
+      - name: Integrate Native Libraries into Application Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find frontend/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No se encontró la aplicación .app generada en Release"
+            exit 1
+          fi
+          echo "Integrando binarios nativos en: $APP_PATH"
+          mkdir -p "$APP_PATH/Contents/Frameworks" "$APP_PATH/Contents/MacOS"
+          
+          RUST_OUT="engine/target/${{ matrix.rust_target }}/release"
+          if [ ! -d "$RUST_OUT" ]; then
+            RUST_OUT="engine/target/release"
+          fi
+          
+          cp "$RUST_OUT/libbdj_search_ffi.dylib" "$APP_PATH/Contents/Frameworks/"
+          cp "$RUST_OUT/libbdj_search_ffi.dylib" "$APP_PATH/Contents/MacOS/"
+          cp "$RUST_OUT/bdj_search_indexer" "$APP_PATH/Contents/MacOS/"
+          chmod +x "$APP_PATH/Contents/MacOS/bdj_search_indexer"
 
       - name: Validate Entitlements Isolation
+        shell: bash
         run: |
-          ENTITLEMENTS_OUT=$(codesign -d --entitlements :- frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app || true)
+          set -euo pipefail
+          APP_PATH="$(find frontend/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
+          ENTITLEMENTS_OUT=$(codesign -d --entitlements :- "$APP_PATH" 2>&1 || true)
+          echo "$ENTITLEMENTS_OUT"
           if echo "$ENTITLEMENTS_OUT" | grep -i -E 'samplepad|stems|wavevideo|synth|voicespot|license'; then
-            echo "ERROR: Entitlements leakage detected across suite apps!"
+            echo "::error::Fallo de aislamiento: La aplicación incluye grupos de Keychain de otras aplicaciones de la suite."
             exit 1
           fi
 
-      - name: Upload macOS Build Artifacts
+      - name: Validate Architecture & Prepare Application
+        id: app
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find frontend/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "::error::No se encontró ninguna aplicación .app generada en Release"
+            exit 1
+          fi
+          APP_NAME="$(basename "$APP_PATH" .app)"
+          ARCH='${{ matrix.architecture }}'
+          LIPO_ARCH="$ARCH"
+          if [ "$ARCH" = 'x64' ]; then LIPO_ARCH='x86_64'; fi
+
+          while IFS= read -r -d '' BINARY_PATH; do
+            ARCHS="$(lipo -archs "$BINARY_PATH" 2>/dev/null || true)"
+            if [[ " $ARCHS " == *" $LIPO_ARCH "* ]] && [ "$(wc -w <<< "$ARCHS")" -gt 1 ]; then
+              THIN_PATH="${BINARY_PATH}.thin"
+              lipo "$BINARY_PATH" -thin "$LIPO_ARCH" -output "$THIN_PATH"
+              mv "$THIN_PATH" "$BINARY_PATH"
+            fi
+          done < <(find "$APP_PATH" -type f -print0)
+
+          # Re-firmar el bundle de forma ad-hoc con los entitlements preservados
+          ENT_TMP="/tmp/prep_bundle.entitlements"
+          codesign -d --entitlements - --xml "$APP_PATH" > "$ENT_TMP" 2>/dev/null || true
+          if [ -s "$ENT_TMP" ] && grep -q "<plist" "$ENT_TMP"; then
+            codesign --force --deep --sign - --entitlements "$ENT_TMP" "$APP_PATH"
+          else
+            codesign --force --deep --sign - "$APP_PATH"
+          fi
+          rm -f "$ENT_TMP"
+          codesign --verify --verbose "$APP_PATH"
+
+          EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          EXECUTABLE_PATH="$APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"
+          echo "Arquitectura final del ejecutable: $(lipo -archs "$EXECUTABLE_PATH")"
+          test "$(lipo -archs "$EXECUTABLE_PATH")" = "$LIPO_ARCH"
+
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+          echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Package ZIP with ditto
+        shell: bash
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent \
+            '${{ steps.app.outputs.app_path }}' \
+            '${{ steps.app.outputs.app_name }}-macOS-${{ matrix.architecture }}.zip'
+
+      - name: Verificar Integridad del ZIP Extraído
+        shell: bash
+        run: |
+          set -euo pipefail
+          TEST_EXTRACT_DIR="/tmp/test_extract_searchpro_$(date +%s)"
+          mkdir -p "$TEST_EXTRACT_DIR"
+          ZIP_FILE='${{ steps.app.outputs.app_name }}-macOS-${{ matrix.architecture }}.zip'
+          echo "Extrayendo $ZIP_FILE para validar estructura..."
+          ditto -x -k "$ZIP_FILE" "$TEST_EXTRACT_DIR"
+          EXTRACTED_APP="$TEST_EXTRACT_DIR/${{ steps.app.outputs.app_name }}.app"
+          if [ ! -d "$EXTRACTED_APP" ]; then
+            echo "::error::La estructura .app no se conservó intacta tras la extracción."
+            exit 1
+          fi
+          EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$EXTRACTED_APP/Contents/Info.plist")"
+          EXECUTABLE_PATH="$EXTRACTED_APP/Contents/MacOS/$EXECUTABLE_NAME"
+          if [ ! -f "$EXECUTABLE_PATH" ] || [ ! -x "$EXECUTABLE_PATH" ]; then
+            echo "::error::El binario principal ($EXECUTABLE_PATH) no existe o carece de permisos de ejecución."
+            exit 1
+          fi
+          if [ ! -f "$EXTRACTED_APP/Contents/MacOS/bdj_search_indexer" ]; then
+            echo "::error::El binario auxiliar del indexador no está en el bundle extraído."
+            exit 1
+          fi
+          echo "✓ Validación de extracción superada: Bundle .app e indexador nativo intactos."
+          rm -rf "$TEST_EXTRACT_DIR"
+
+      - name: Generate SHA-256 Checksum
+        shell: bash
+        run: |
+          shasum -a 256 *.zip > checksums-macOS-${{ matrix.architecture }}.sha256
+          cat checksums-macOS-${{ matrix.architecture }}.sha256
+
+      - name: Upload macOS ZIP & SHA-256 to Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: BDJ_Studio_Search_Pro_macOS
-          path: frontend/build/macos/Build/Products/Release/bdj_studio_search_pro.app
+          name: BDJ-Studio-Search-Pro-macOS-${{ matrix.architecture }}
+          path: |
+            *.zip
+            *.sha256
+          if-no-files-found: error
+          retention-days: 30

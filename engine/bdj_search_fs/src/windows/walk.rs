@@ -299,27 +299,27 @@ mod tests {
 
     #[test]
     fn test_scan_users_dir() {
+        let temp_dir = std::env::temp_dir().join(format!("bdj_test_walk_{}", std::process::id()));
+        let sub_dir = temp_dir.join("subfolder");
+        let _ = std::fs::create_dir_all(&sub_dir);
+        std::fs::write(temp_dir.join("file1.txt"), b"test content 1").unwrap();
+        std::fs::write(sub_dir.join("file2.mp3"), b"test content 2").unwrap();
+
         let mut builder = bdj_search_core::index::builder::IndexBuilder::new();
         let vol_id = builder.vol_table.add_or_update(r"C:\", "Windows", "NTFS", false);
         let root_id = builder.add_entry(u32::MAX, "", true, false, false, vol_id, 0, 0, 0);
-        let user_dir = std::path::Path::new(r"C:\Users\David Zapata\Downloads");
+
         let start = std::time::Instant::now();
-        let count = scan_subtree_into_builder(user_dir, root_id, vol_id, &mut builder);
-        println!("Indexed {} files in Downloads in {:?}", count, start.elapsed());
-        assert!(count > 0);
+        let count = scan_subtree_into_builder(&temp_dir, root_id, vol_id, &mut builder);
+        println!("Indexed {} files in temp dir in {:?}", count, start.elapsed());
+        assert!(count >= 2);
 
-        // Also index Desktop and Music if available
-        let desktop = std::path::Path::new(r"C:\Users\David Zapata\Desktop");
-        let d_count = scan_subtree_into_builder(desktop, root_id, vol_id, &mut builder);
-        println!("Indexed {} files in Desktop", d_count);
-
-        let out_dir = std::path::PathBuf::from(r"C:\ProgramData\BDJ Studio\Search Pro");
-        let _ = std::fs::create_dir_all(&out_dir);
-        let index_path = out_dir.join("index.bdjx");
-        let write_start = std::time::Instant::now();
+        let index_path = temp_dir.join("test_index.bdjx");
         let mut file = std::fs::File::create(&index_path).unwrap();
         let write_res = builder.write_to(&mut file);
-        println!("Written index to {:?}: {:?} in {:?}", index_path, write_res, write_start.elapsed());
+        println!("Written index to {:?}: {:?} in {:?}", index_path, write_res, start.elapsed());
         assert!(write_res.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

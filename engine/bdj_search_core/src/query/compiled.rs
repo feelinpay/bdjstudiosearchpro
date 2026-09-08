@@ -209,7 +209,7 @@ impl CompiledQuery {
                 id != 0 && (id as usize) < mask.len() && mask[id as usize]
             }
             CompiledQuery::Size { min, max } => {
-                let s = view.size[idx];
+                let s = view.size_of(idx);
                 !(min.is_some_and(|v| s < v) || max.is_some_and(|v| s > v))
             }
             CompiledQuery::DateModified { min, max } => {

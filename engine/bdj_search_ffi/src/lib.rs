@@ -4,6 +4,8 @@ pub mod api;
 pub mod diagnostics;
 pub mod frb_generated;
 pub mod rowsrc;
+#[cfg(test)]
+mod path_tests;
 pub mod service;
 
 pub use api::*;

@@ -99,7 +99,18 @@ impl SearchResult {
 enum KeySource<'a> {
     /// Posición alfabética precalculada. Ordenar por nombre sin comparar cadenas.
     U32(&'a [u32]),
-    U64(&'a [u64]),
+    /// Tamaño de archivo, que se guarda en cuatro bytes con una tabla aparte
+    /// para los que pasan de 4 GiB.
+    ///
+    /// La columna sola ya ordena bien casi todo: los que están en la tabla
+    /// llevan la marca `u32::MAX`, que es mayor que cualquier tamaño que sí
+    /// quepa, así que quedan al final igualmente. La tabla solo hace falta para
+    /// ordenarlos **entre ellos**, y son unas pocas decenas en un disco normal.
+    Size {
+        small: &'a [u32],
+        big_id: &'a [u32],
+        big_val: &'a [u64],
+    },
     /// Clave sacada de una tabla pequeña indexada por identificador de extensión.
     ///
     /// Sirve para ordenar por extensión y por tipo sin mirar ni una cadena: la
@@ -145,7 +156,18 @@ impl SortKey<'_> {
     fn of(&self, id: u32) -> u64 {
         let raw = match &self.source {
             KeySource::U32(keys) => *keys.get(id as usize).unwrap_or(&0) as u64,
-            KeySource::U64(keys) => *keys.get(id as usize).unwrap_or(&0),
+            KeySource::Size {
+                small,
+                big_id,
+                big_val,
+            } => match small.get(id as usize) {
+                Some(&crate::index::layout::SIZE_IN_SIDE_TABLE) => match big_id.binary_search(&id) {
+                    Ok(pos) => *big_val.get(pos).unwrap_or(&0),
+                    Err(_) => 0,
+                },
+                Some(&s) => s as u64,
+                None => 0,
+            },
             KeySource::ByExt {
                 ext_id,
                 flags,
@@ -607,7 +629,11 @@ impl Engine {
                 dir_key: 0,
                 table: Self::extension_rank_table(view),
             },
-            3 => KeySource::U64(view.size),
+            3 => KeySource::Size {
+                small: view.size,
+                big_id: view.size_big_id,
+                big_val: view.size_big_val,
+            },
             4 => KeySource::U32(view.mtime),
             5 => KeySource::ByExt {
                 ext_id: view.ext_id,

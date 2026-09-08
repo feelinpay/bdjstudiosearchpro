@@ -44,6 +44,27 @@ fn chunk() -> usize {
 pub fn run(shared: &OpShared, req: OpRequest) {
     shared.set_state(OpState::Planning);
 
+    // Nada destructivo empieza sin comprobar sobre qué va a actuar.
+    //
+    // Un usuario llegó a ver «No se pudo enviar C:\ a la papelera»: la
+    // aplicación había pedido de verdad que la raíz del disco fuera a la
+    // papelera, y quien la salvó fue la biblioteca de papelera negándose por su
+    // cuenta, con un error interno que además no significa nada para quien lo
+    // lee. Entre la fila que se marca y el archivo que se borra hay una tabla
+    // virtualizada, una caché de páginas, dos espacios de identificadores y un
+    // índice que se renumera solo; cualquiera de esas piezas puede fallar algún
+    // día, y ninguna debería poder fallar hasta el punto de apuntar a un disco
+    // entero.
+    if matches!(
+        req.kind,
+        OpKind::Trash | OpKind::Move | OpKind::Rename | OpKind::DeletePermanently
+    ) && let Err(motivo) = crate::guards::check_all(&req.sources)
+    {
+        shared.push_error(motivo);
+        shared.set_state(OpState::Failed);
+        return;
+    }
+
     // Se guarda la petición original para que rehacer pueda volver a ejecutarla.
     shared.set_original(req.clone());
 
@@ -139,13 +160,13 @@ OpKind::Copy | OpKind::Duplicate | OpKind::Move => {
             let mut items = 0u64;
             let mut bytes = 0u64;
             for src in &req.sources {
-                if let Ok(file) = std::fs::File::open(src) {
-                    if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                        items += archive.len() as u64;
-                        for i in 0..archive.len() {
-                            if let Ok(f) = archive.by_index(i) {
-                                bytes += f.size();
-                            }
+                if let Ok(file) = std::fs::File::open(src)
+                    && let Ok(mut archive) = zip::ZipArchive::new(file)
+                {
+                    items += archive.len() as u64;
+                    for i in 0..archive.len() {
+                        if let Ok(f) = archive.by_index(i) {
+                            bytes += f.size();
                         }
                     }
                 }
@@ -940,22 +961,22 @@ fn compress_zip(shared: &OpShared, req: &OpRequest) -> Result<(), String> {
                     }
                 }
             } else {
-                if let Ok(mut f) = fs::File::open(&current) {
-                    if zip.start_file(&rel_name, options).is_ok() {
-                        loop {
-                            if shared.is_cancelled() {
-                                break;
-                            }
-                            match f.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    if zip.write_all(&buf[..n]).is_err() {
-                                        break;
-                                    }
-                                    shared.advance_bytes(n as u64);
+                if let Ok(mut f) = fs::File::open(&current)
+                    && zip.start_file(&rel_name, options).is_ok()
+                {
+                    loop {
+                        if shared.is_cancelled() {
+                            break;
+                        }
+                        match f.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                if zip.write_all(&buf[..n]).is_err() {
+                                    break;
                                 }
-                                Err(_) => break,
+                                shared.advance_bytes(n as u64);
                             }
+                            Err(_) => break,
                         }
                     }
                 }
