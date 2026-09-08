@@ -343,6 +343,7 @@ fn resolve_default_index_path() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     return default_macos_index_path();
+    #[cfg(not(target_os = "macos"))]
     PathBuf::from("index.bdjx")
 }
 
@@ -929,7 +930,7 @@ pub fn breadcrumb(path: String) -> Vec<CrumbFfi> {
     let sin_barras_previas = if let Some(pos) = unificada.find(':') {
         if pos >= 1 {
             let ch = unificada.as_bytes()[pos - 1];
-            if (b'a'..=b'z').contains(&ch) || (b'A'..=b'Z').contains(&ch) {
+            if ch.is_ascii_alphabetic() {
                 // Hay una letra de unidad en pos - 1
                 &unificada[(pos - 1)..]
             } else {
@@ -1075,15 +1076,17 @@ pub fn open_with(path_str: String) -> Result<(), String> {
             .raw_arg(format!("shell32.dll,OpenAs_RunDLL \"{path_str}\""))
             .spawn()
             .map_err(|e| format!("Error al abrir el diálogo: {e}"))?;
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
     {
         // macOS no tiene un «abrir con» genérico desde consola; mostrarlo en el
         // Finder es lo más cercano y deja al usuario elegir desde ahí.
-        return reveal_path(path_str);
+        reveal_path(path_str)
     }
 
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     Ok(())
 }
 

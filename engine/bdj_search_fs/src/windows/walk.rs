@@ -150,12 +150,6 @@ pub fn scan_subtree(root: &Path, max_depth: usize) -> Vec<FsEntry> {
                         || entry.name.eq_ignore_ascii_case("Documents")
                     {
                         queue.push_front((sub_path, depth + 1));
-                    } else if entry.name.eq_ignore_ascii_case("Windows")
-                        || entry.name.eq_ignore_ascii_case("AppData")
-                        || entry.name.eq_ignore_ascii_case(".git")
-                        || entry.name.eq_ignore_ascii_case("node_modules")
-                    {
-                        queue.push_back((sub_path, depth + 1));
                     } else {
                         queue.push_back((sub_path, depth + 1));
                     }
@@ -252,31 +246,25 @@ pub fn scan_subtree_into_builder(
                     );
                     count += 1;
 
-                    if is_dir && !is_reparse_point {
-                        if !name.starts_with('$')
-                            && !name.eq_ignore_ascii_case("System Volume Information")
-                            && !name.eq_ignore_ascii_case("WinSxS")
-                        {
-                            let mut sub_path = curr_dir.clone();
-                            sub_path.push(&name);
+                    if is_dir
+                        && !is_reparse_point
+                        && !name.starts_with('$')
+                        && !name.eq_ignore_ascii_case("System Volume Information")
+                        && !name.eq_ignore_ascii_case("WinSxS")
+                    {
+                        let mut sub_path = curr_dir.clone();
+                        sub_path.push(&name);
 
-                            if name.eq_ignore_ascii_case("Users")
-                                || name.eq_ignore_ascii_case("Downloads")
-                                || name.eq_ignore_ascii_case("Desktop")
-                                || name.eq_ignore_ascii_case("Music")
-                                || name.eq_ignore_ascii_case("Videos")
-                                || name.eq_ignore_ascii_case("Documents")
-                            {
-                                queue.push_front((sub_path, entry_id, depth + 1));
-                            } else if name.eq_ignore_ascii_case("Windows")
-                                || name.eq_ignore_ascii_case("AppData")
-                                || name.eq_ignore_ascii_case(".git")
-                                || name.eq_ignore_ascii_case("node_modules")
-                            {
-                                queue.push_back((sub_path, entry_id, depth + 1));
-                            } else {
-                                queue.push_back((sub_path, entry_id, depth + 1));
-                            }
+                        if name.eq_ignore_ascii_case("Users")
+                            || name.eq_ignore_ascii_case("Downloads")
+                            || name.eq_ignore_ascii_case("Desktop")
+                            || name.eq_ignore_ascii_case("Music")
+                            || name.eq_ignore_ascii_case("Videos")
+                            || name.eq_ignore_ascii_case("Documents")
+                        {
+                            queue.push_front((sub_path, entry_id, depth + 1));
+                        } else {
+                            queue.push_back((sub_path, entry_id, depth + 1));
                         }
                     }
                 }

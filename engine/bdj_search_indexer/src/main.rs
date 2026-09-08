@@ -266,7 +266,7 @@ fn pico_de_memoria_mb() -> u64 {
         if unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) } != 0 {
             return (c.peak_working_set_size / (1024 * 1024)) as u64;
         }
-        return 0;
+        0
     }
 
     #[cfg(target_os = "linux")]
@@ -1253,7 +1253,7 @@ impl IndexerService {
             watch.volumes.retain(|w| {
                 let sigue = current_vols
                     .iter()
-                    .any(|v| v.is_ready && v.path.chars().next() == Some(w.drive_letter));
+                    .any(|v| v.is_ready && v.path.starts_with(w.drive_letter));
                 if !sigue {
                     tracing::info!("Volumen desconectado: {}:", w.drive_letter);
                 }
@@ -1841,10 +1841,10 @@ fn apply_usn_change(
     let added = (rec.reason & usn_reason::ADDED) != 0;
     let modified = (rec.reason & usn_reason::MODIFIED) != 0;
 
-    if removed || modified {
-        if let Some(old_id) = frn_to_id.remove(&rec.file_ref) {
-            overlay.mark_deleted(old_id);
-        }
+    if (removed || modified)
+        && let Some(old_id) = frn_to_id.remove(&rec.file_ref)
+    {
+        overlay.mark_deleted(old_id);
     }
 
     if !(added || modified) {

@@ -65,7 +65,7 @@ jobs:
         run: flutter config --enable-macos-desktop
 
       - name: Install flutter_rust_bridge_codegen
-        run: cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+        run: cargo install flutter_rust_bridge_codegen --version 2.13.0
 
       - name: Link bdj_license_core and Install Flutter dependencies
         run: |
