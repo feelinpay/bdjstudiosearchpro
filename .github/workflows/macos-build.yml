@@ -131,7 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           APP_PATH="$(find frontend/build/macos/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print -quit)"
-          ENTITLEMENTS_OUT=$(codesign -d --entitlements :- "$APP_PATH" 2>&1 || true)
+          ENTITLEMENTS_OUT=$(codesign -d --entitlements - --xml "$APP_PATH" 2>&1 || true)
           echo "$ENTITLEMENTS_OUT"
           if echo "$ENTITLEMENTS_OUT" | grep -i -E 'samplepad|stems|wavevideo|synth|voicespot|license'; then
             echo "::error::Fallo de aislamiento: La aplicación incluye grupos de Keychain de otras aplicaciones de la suite."
