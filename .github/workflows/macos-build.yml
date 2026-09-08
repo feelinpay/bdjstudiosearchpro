@@ -1,4 +1,4 @@
-﻿name: Build macOS
+name: Build macOS
 
 # ============================================================
 # MODELO DE DISTRIBUCIÓN: DIRECTA Y FUERA DE TIENDAS
@@ -69,9 +69,12 @@ jobs:
 
       - name: Link bdj_license_core and Install Flutter dependencies
         run: |
-          mkdir -p ../../bdj_license_core 2>/dev/null || true
-          cp -R bdj_license_core/* ../../bdj_license_core/ 2>/dev/null || cp -R "$GITHUB_WORKSPACE/bdj_license_core"/* ../../bdj_license_core/ || true
+          # Asegurar que el path relativo ../../bdj_license_core funcione desde frontend/ como en BDJ Studio Sample Pad
+          mkdir -p "$GITHUB_WORKSPACE/../bdj_license_core" 2>/dev/null || true
+          cp -R "$GITHUB_WORKSPACE/bdj_license_core"/* "$GITHUB_WORKSPACE/../bdj_license_core/" 2>/dev/null || cp -R bdj_license_core/* "$GITHUB_WORKSPACE/../bdj_license_core/" || true
           cd frontend
+          mkdir -p ../../bdj_license_core 2>/dev/null || true
+          cp -R ../bdj_license_core/* ../../bdj_license_core/ 2>/dev/null || cp -R "$GITHUB_WORKSPACE/bdj_license_core"/* ../../bdj_license_core/ || true
           flutter pub get
 
       - name: Regenerate Flutter-Rust Bridge
