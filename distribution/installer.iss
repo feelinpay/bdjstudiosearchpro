@@ -91,3 +91,51 @@ Type: filesandordirs; Name: "{userappdata}\com.bdjstudio\BDJ Studio Search Pro"
 Type: filesandordirs; Name: "{userappdata}\com.bdjstudio"
 ; Licencia local y datos de usuario en LOCALAPPDATA
 Type: filesandordirs; Name: "{localappdata}\BDJ Studio\Search Pro"
+Type: filesandordirs; Name: "{localappdata}\BDJ Studio\BDJ Studio Search Pro"
+Type: filesandordirs; Name: "{localappdata}\BDJ Studio\bdj_studio_search_pro"
+
+[Code]
+// Eliminación forzada y recursiva de todos los datos en AppData al desinstalar.
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: String;
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    // 1. Borrar datos de Roaming
+    DataDir := ExpandConstant('{userappdata}\BDJ Studio\BDJ Studio Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{userappdata}\BDJ Studio\bdj_studio_search_pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{userappdata}\BDJ Studio Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{userappdata}\com.bdjstudio\BDJ Studio Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{userappdata}\com.bdjstudio');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    // 2. Borrar datos de Local
+    DataDir := ExpandConstant('{localappdata}\BDJ Studio\Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{localappdata}\BDJ Studio\BDJ Studio Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    DataDir := ExpandConstant('{localappdata}\BDJ Studio\bdj_studio_search_pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    // 3. Borrar datos de CommonAppData (ProgramData)
+    DataDir := ExpandConstant('{commonappdata}\BDJ Studio\Search Pro');
+    if DirExists(DataDir) then DelTree(DataDir, True, True, True);
+
+    // 4. Limpieza de carpetas de marca padre:
+    // RemoveDir SOLO tiene éxito si la carpeta está completamente vacía (no quedan otras apps).
+    RemoveDir(ExpandConstant('{userappdata}\BDJ Studio'));
+    RemoveDir(ExpandConstant('{localappdata}\BDJ Studio'));
+    RemoveDir(ExpandConstant('{commonappdata}\BDJ Studio'));
+  end;
+end;
