@@ -17,11 +17,13 @@ pub fn max_cached_per_entry() -> usize {
 
 pub const MAX_CACHED_PER_ENTRY: usize = 2_000_000;
 
+use std::sync::Arc;
+
 #[derive(Clone, Debug)]
 pub struct RefinementEntry {
     pub query: String,
     pub ast: QueryAst,
-    pub results: Vec<u32>,
+    pub results: Arc<[u32]>,
 }
 
 #[derive(Default, Debug)]
@@ -34,7 +36,7 @@ impl RefinementStack {
         Self { stack: Vec::new() }
     }
 
-    pub fn push(&mut self, query: String, ast: QueryAst, results: Vec<u32>) {
+    pub fn push(&mut self, query: String, ast: QueryAst, results: Arc<[u32]>) {
         // Keep max 16 progressive keystroke steps in the stack
         if self.stack.len() >= 16 {
             self.stack.remove(0);
@@ -56,7 +58,7 @@ impl RefinementStack {
 
     /// Finds the closest/longest prefix query in the stack that is monotonically compatible
     /// with `new_query` and `new_ast`.
-    pub fn find_candidate(&self, new_query: &str, new_ast: &QueryAst) -> Option<&[u32]> {
+    pub fn find_candidate(&self, new_query: &str, new_ast: &QueryAst) -> Option<Arc<[u32]>> {
         for entry in self.stack.iter().rev() {
             // `implied_by(nueva, vieja)`: todo lo que cumple la consulta nueva
             // cumplía ya la vieja, así que el resultado nuevo es un subconjunto
@@ -64,7 +66,7 @@ impl RefinementStack {
             if new_query.starts_with(&entry.query)
                 && QueryEvaluator::implied_by(new_ast, &entry.ast)
             {
-                return Some(&entry.results);
+                return Some(entry.results.clone());
             }
         }
         None

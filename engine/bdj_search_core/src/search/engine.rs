@@ -360,12 +360,12 @@ impl Engine {
 
         // ¿Hay un resultado anterior que contenga con seguridad a este?
         let candidates = {
-            let stack = self.refine_stack.lock().unwrap();
-            stack.find_candidate(trimmed, &ast).map(|s| s.to_vec())
+            let stack = self.refine_stack.lock().unwrap_or_else(|e| e.into_inner());
+            stack.find_candidate(trimmed, &ast)
         };
 
-        let chunks: Vec<ChunkHits> = match candidates {
-            Some(prev) => Self::scan_candidates(view, &compiled, &prev, &self.token, search_gen),
+        let chunks: Vec<ChunkHits> = match &candidates {
+            Some(prev) => Self::scan_candidates(view, &compiled, prev, &self.token, search_gen),
             None => Self::scan_all(view, &compiled, count, &self.token, search_gen),
         };
 
@@ -449,7 +449,7 @@ impl Engine {
             return;
         }
         let mut stack = self.refine_stack.lock().unwrap_or_else(|e| e.into_inner());
-        stack.push(query.to_string(), ast.clone(), ids);
+        stack.push(query.to_string(), ast.clone(), ids.into());
     }
 
     /// Ordena y recorta un conjunto de identificadores ya conocido.
