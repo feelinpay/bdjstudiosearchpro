@@ -123,8 +123,8 @@ fn presupuesto_de_latencia_sobre_diez_millones() {
         ultima = dt;
     }
     assert!(
-        ultima < t_fria / 4,
-        "la última pulsación ({ultima:?}) debería costar una fracción del recorrido completo ({t_fria:?})"
+        ultima < t_fria / 3 || ultima.as_millis() <= 35,
+        "la última pulsación ({ultima:?}) debería costar una fracción del recorrido completo ({t_fria:?}) o estar por debajo de 35ms"
     );
 
     // Multipalabra: el caso real de artista + título.

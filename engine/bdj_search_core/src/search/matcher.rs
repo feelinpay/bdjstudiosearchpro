@@ -60,26 +60,44 @@ impl SubstringMatcher {
 
         while offset + plen <= text.len() {
             let hay = &text[offset..];
-            if let Some(pos) = memchr2(self.first_lower, self.first_upper, hay) {
-                let start = offset + pos;
-                if start + plen > text.len() {
-                    return false;
+            let b = hay[0];
+            let pos = if b == self.first_lower || b == self.first_upper {
+                0
+            } else if hay.len() < 32 {
+                let mut found = None;
+                for (i, &byte) in hay.iter().enumerate().skip(1) {
+                    if byte == self.first_lower || byte == self.first_upper {
+                        found = Some(i);
+                        break;
+                    }
                 }
-                
-                // Si el patrón es de un byte, memchr2 ya garantizó la coincidencia exacta
-                if plen == 1 {
-                    return true;
+                match found {
+                    Some(p) => p,
+                    None => return false,
                 }
-
-                // Fast case-insensitive compare of the remainder (saltando byte 0 ya verificado)
-                let candidate = &text[start + 1..start + plen];
-                if Self::ascii_eq_ignore_case(candidate, &p_slice[1..]) {
-                    return true;
-                }
-                offset = start + 1;
             } else {
+                match memchr2(self.first_lower, self.first_upper, hay) {
+                    Some(p) => p,
+                    None => return false,
+                }
+            };
+
+            let start = offset + pos;
+            if start + plen > text.len() {
                 return false;
             }
+
+            // Si el patrón es de un byte, ya garantizó la coincidencia exacta
+            if plen == 1 {
+                return true;
+            }
+
+            // Fast case-insensitive compare of the remainder (saltando byte 0 ya verificado)
+            let candidate = &text[start + 1..start + plen];
+            if Self::ascii_eq_ignore_case(candidate, &p_slice[1..]) {
+                return true;
+            }
+            offset = start + 1;
         }
 
         false

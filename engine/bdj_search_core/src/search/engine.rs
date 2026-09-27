@@ -218,10 +218,32 @@ impl SortKey<'_> {
         if ids.len() <= n {
             return ids.to_vec();
         }
-        let mut pairs = self.pairs(ids);
-        pairs.select_nth_unstable(n);
-        pairs.truncate(n);
-        pairs.into_iter().map(|p| p.1).collect()
+        if n > ids.len() / 2 {
+            let mut pairs = self.pairs(ids);
+            pairs.select_nth_unstable(n);
+            pairs.truncate(n);
+            return pairs.into_iter().map(|p| p.1).collect();
+        }
+
+        use std::collections::BinaryHeap;
+        let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(n);
+        let mut max_key = u64::MAX;
+
+        for &id in ids {
+            let k = self.of(id);
+            if heap.len() < n {
+                heap.push((k, id));
+                if heap.len() == n {
+                    max_key = heap.peek().map(|p| p.0).unwrap_or(u64::MAX);
+                }
+            } else if k < max_key {
+                heap.pop();
+                heap.push((k, id));
+                max_key = heap.peek().map(|p| p.0).unwrap_or(u64::MAX);
+            }
+        }
+
+        heap.into_iter().map(|p| p.1).collect()
     }
 
     fn keep_best(&self, ids: &mut Vec<u32>, n: usize) {
@@ -581,6 +603,11 @@ impl Engine {
     ) -> Vec<ChunkHits> {
         let threads = pool().map(|p| p.current_num_threads()).unwrap_or(1);
         let c_chunk = (candidates.len() / (threads * 2)).max(1024);
+        let single_ascii_term = match compiled {
+            CompiledQuery::Term(t) if t.is_ascii_pattern() => Some(t),
+            _ => None,
+        };
+
         en_el_grupo(|| {
         candidates
             .par_chunks(c_chunk)
@@ -591,15 +618,23 @@ impl Engine {
                         ids: Vec::new(),
                     };
                 }
-                let mut scratch = MatchScratch::new();
                 let mut ids = Vec::new();
-                for &id in slice {
-                    let u_idx = id as usize;
-                    if !view.is_alive(u_idx) {
-                        continue;
+                if let Some(term) = single_ascii_term {
+                    let flags = view.flags;
+                    for &id in slice {
+                        let u_idx = id as usize;
+                        let non_ascii = (flags[u_idx] & crate::index::layout::FLAG_NON_ASCII) != 0;
+                        if term.matches(view.get_name_bytes(u_idx), non_ascii) {
+                            ids.push(id);
+                        }
                     }
-                    if compiled.matches(view, u_idx, &mut scratch) {
-                        ids.push(id);
+                } else {
+                    let mut scratch = MatchScratch::new();
+                    for &id in slice {
+                        let u_idx = id as usize;
+                        if compiled.matches(view, u_idx, &mut scratch) {
+                            ids.push(id);
+                        }
                     }
                 }
                 ChunkHits {
