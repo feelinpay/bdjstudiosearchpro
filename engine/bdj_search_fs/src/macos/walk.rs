@@ -311,6 +311,24 @@ mod tests {
         f1.write_all(&vec![b'A'; 1234]).unwrap();
         drop(f1);
 
+        // Fijar mtime a 2020-01-01 00:00:00 UTC (1_577_836_800) mediante libc::utimes
+        let target_mtime: libc::time_t = 1_577_836_800;
+        let times = [
+            libc::timeval {
+                tv_sec: target_mtime,
+                tv_usec: 0,
+            },
+            libc::timeval {
+                tv_sec: target_mtime,
+                tv_usec: 0,
+            },
+        ];
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(file1_path.as_os_str().as_bytes()).unwrap();
+        let ut_res = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
+        assert_eq!(ut_res, 0, "libc::utimes debe completarse con éxito");
+
         // 2. Archivo vacío (0 bytes)
         let file2_path = root.join("vacio.bin");
         File::create(&file2_path).unwrap();
@@ -325,12 +343,19 @@ mod tests {
         let subdir_path = root.join("mi_subcarpeta");
         fs::create_dir(&subdir_path).unwrap();
 
+        // 5. Archivo con nombre largo y caracteres no ASCII para verificar desplazamiento del nombre
+        let unicode_name = "Canción — remix ñandú (extended).wav";
+        let unicode_path = root.join(unicode_name);
+        let mut f_u = File::create(&unicode_path).unwrap();
+        f_u.write_all(b"audio data").unwrap();
+        drop(f_u);
+
         // Ejecutar ambos métodos
         let bulk = scan_directory_bulk(root).expect("scan_directory_bulk debe funcionar en macOS");
         let fallback = scan_directory_fallback(root);
 
-        assert_eq!(bulk.len(), 4, "debe encontrar exactamente 4 entradas");
-        assert_eq!(fallback.len(), 4, "fallback debe encontrar exactamente 4 entradas");
+        assert_eq!(bulk.len(), 5, "debe encontrar exactamente 5 entradas");
+        assert_eq!(fallback.len(), 5, "fallback debe encontrar exactamente 5 entradas");
 
         let mut bulk_sorted = bulk.clone();
         bulk_sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -355,6 +380,12 @@ mod tests {
                 "ctime debe coincidir para {}: bulk={}, fb={}",
                 b.name, b.ctime, fb.ctime
             );
+
+            // Si es archivo1.txt, verificar que mtime sea exactamente 2020 y ctime sea diferente
+            if b.name == "archivo1.txt" {
+                assert_eq!(b.mtime, 1_577_836_800, "mtime debe ser exactamente el fijado en 2020");
+                assert_ne!(b.ctime, b.mtime, "ctime (creación) debe ser distinto de mtime (2020)");
+            }
 
             // Verificar también contra std::fs::metadata
             let item_path = root.join(&b.name);
