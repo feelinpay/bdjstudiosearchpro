@@ -177,10 +177,18 @@ impl UnixSocketServer {
         }
     }
 
+    pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
     pub fn read_command(stream: &mut UnixStream) -> io::Result<IpcCommand> {
         let mut len_buf = [0u8; 4];
         stream.read_exact(&mut len_buf)?;
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > Self::MAX_MESSAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("El tamaño del mensaje IPC ({len} bytes) excede el tope de seguridad de {} bytes", Self::MAX_MESSAGE_SIZE),
+            ));
+        }
         let mut payload = vec![0u8; len];
         stream.read_exact(&mut payload)?;
         decode_command(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
@@ -219,6 +227,12 @@ impl UnixSocketClient {
         let mut len_buf = [0u8; 4];
         self.stream.read_exact(&mut len_buf)?;
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > UnixSocketServer::MAX_MESSAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("El tamaño del evento IPC ({len} bytes) excede el tope de seguridad de {} bytes", UnixSocketServer::MAX_MESSAGE_SIZE),
+            ));
+        }
         let mut payload = vec![0u8; len];
         self.stream.read_exact(&mut payload)?;
         decode_event(&payload).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))

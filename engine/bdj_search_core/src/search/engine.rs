@@ -218,32 +218,10 @@ impl SortKey<'_> {
         if ids.len() <= n {
             return ids.to_vec();
         }
-        if n > ids.len() / 2 {
-            let mut pairs = self.pairs(ids);
-            pairs.select_nth_unstable(n);
-            pairs.truncate(n);
-            return pairs.into_iter().map(|p| p.1).collect();
-        }
-
-        use std::collections::BinaryHeap;
-        let mut heap: BinaryHeap<(u64, u32)> = BinaryHeap::with_capacity(n);
-        let mut max_key = u64::MAX;
-
-        for &id in ids {
-            let k = self.of(id);
-            if heap.len() < n {
-                heap.push((k, id));
-                if heap.len() == n {
-                    max_key = heap.peek().map(|p| p.0).unwrap_or(u64::MAX);
-                }
-            } else if k < max_key {
-                heap.pop();
-                heap.push((k, id));
-                max_key = heap.peek().map(|p| p.0).unwrap_or(u64::MAX);
-            }
-        }
-
-        heap.into_iter().map(|p| p.1).collect()
+        let mut pairs = self.pairs(ids);
+        pairs.select_nth_unstable(n);
+        pairs.truncate(n);
+        pairs.into_iter().map(|p| p.1).collect()
     }
 
     fn keep_best(&self, ids: &mut Vec<u32>, n: usize) {

@@ -112,6 +112,8 @@ impl PipeServer {
         }
     }
 
+    pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
     /// Read incoming IpcCommand (4-byte length prefix + postcard payload)
     pub fn read_command(&self) -> io::Result<IpcCommand> {
         let mut len_buf = [0u8; 4];
@@ -128,6 +130,12 @@ impl PipeServer {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete length prefix"));
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > Self::MAX_MESSAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("El tamaño del mensaje IPC ({len} bytes) excede el tope de seguridad de {} bytes", Self::MAX_MESSAGE_SIZE),
+            ));
+        }
         let mut payload = vec![0u8; len];
         let mut total = 0usize;
         while total < len {
@@ -221,6 +229,12 @@ impl PipeClient {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Incomplete length prefix"));
         }
         let len = u32::from_le_bytes(len_buf) as usize;
+        if len > PipeServer::MAX_MESSAGE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("El tamaño del evento IPC ({len} bytes) excede el tope de seguridad de {} bytes", PipeServer::MAX_MESSAGE_SIZE),
+            ));
+        }
         let mut payload = vec![0u8; len];
         let mut total = 0usize;
         while total < len {

@@ -122,9 +122,15 @@ fn presupuesto_de_latencia_sobre_diez_millones() {
         println!("«{q}» -> {} coincidencias en {dt:?}", res.total_count);
         ultima = dt;
     }
+    let tuning = bdj_search_core::tuning::Tuning::current();
+    let max_latencia = match tuning.tier {
+        bdj_search_core::tuning::Tier::Low => std::time::Duration::from_millis(40),
+        _ => std::time::Duration::from_millis(30),
+    };
     assert!(
-        ultima < t_fria / 3 || ultima.as_millis() <= 35,
-        "la última pulsación ({ultima:?}) debería costar una fracción del recorrido completo ({t_fria:?}) o estar por debajo de 35ms"
+        ultima <= max_latencia,
+        "la última pulsación ({ultima:?}) excede el presupuesto para el tier {:?} ({max_latencia:?})",
+        tuning.tier
     );
 
     // Multipalabra: el caso real de artista + título.
