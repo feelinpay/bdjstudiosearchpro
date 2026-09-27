@@ -19,6 +19,12 @@ jobs:
   build-macos:
     name: Build macOS (${{ matrix.architecture }})
     runs-on: ${{ matrix.runner }}
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -162,13 +168,45 @@ jobs:
             fi
           done < <(find "$APP_PATH" -type f -print0)
 
-          # Re-firmar el bundle de forma ad-hoc con los entitlements preservados
+          # Configurar certificado Apple si está disponible en Secrets, o usar ad-hoc
           ENT_TMP="/tmp/prep_bundle.entitlements"
           codesign -d --entitlements - --xml "$APP_PATH" > "$ENT_TMP" 2>/dev/null || true
-          if [ -s "$ENT_TMP" ] && grep -q "<plist" "$ENT_TMP"; then
-            codesign --force --deep --sign - --entitlements "$ENT_TMP" "$APP_PATH"
+          
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 || '' }}" ]; then
+            echo "Importando certificado Apple Developer ID..."
+            KEYCHAIN_PATH="/tmp/build.keychain"
+            KEYCHAIN_PWD="temp_build_keychain_pwd"
+            security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+            security default-keychain -s "$KEYCHAIN_PATH"
+            security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+            
+            CERT_P12="/tmp/cert.p12"
+            echo "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" | base64 --decode > "$CERT_P12"
+            security import "$CERT_P12" -k "$KEYCHAIN_PATH" -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD || '' }}" -T /usr/bin/codesign -T /usr/bin/productsign
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+            rm -f "$CERT_P12"
+
+            APP_IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F '"' '{print $2}' || true)
+            if [ -n "$APP_IDENTITY" ]; then
+              echo "Firmando con Developer ID Application y timestamp: $APP_IDENTITY"
+              find "$APP_PATH/Contents/Frameworks" -type f -name '*.dylib' -exec codesign --force --options runtime --timestamp --sign "$APP_IDENTITY" {} +
+              codesign --force --options runtime --timestamp --sign "$APP_IDENTITY" "$APP_PATH/Contents/MacOS/bdj_search_indexer"
+              if [ -s "$ENT_TMP" ] && grep -q "<plist" "$ENT_TMP"; then
+                codesign --force --options runtime --timestamp --deep --sign "$APP_IDENTITY" --entitlements "$ENT_TMP" "$APP_PATH"
+              else
+                codesign --force --options runtime --timestamp --deep --sign "$APP_IDENTITY" "$APP_PATH"
+              fi
+            else
+              echo "Aviso: No se encontró Developer ID Application en keychain, firmando ad-hoc."
+              codesign --force --deep --sign - "$APP_PATH"
+            fi
           else
-            codesign --force --deep --sign - "$APP_PATH"
+            echo "Aviso: APPLE_CERTIFICATE_BASE64 no configurado, firmando ad-hoc."
+            if [ -s "$ENT_TMP" ] && grep -q "<plist" "$ENT_TMP"; then
+              codesign --force --deep --sign - --entitlements "$ENT_TMP" "$APP_PATH"
+            else
+              codesign --force --deep --sign - "$APP_PATH"
+            fi
           fi
           rm -f "$ENT_TMP"
           codesign --verify --verbose "$APP_PATH"
@@ -180,6 +218,49 @@ jobs:
 
           echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
           echo "app_name=$APP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS Installer Package (.pkg) with LaunchDaemon
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x distribution/macos/build_pkg.sh distribution/macos/postinstall
+          
+          PKG_NAME="${{ steps.app.outputs.app_name }}-macOS-${{ matrix.architecture }}.pkg"
+          echo "Generando paquete .pkg instalable: $PKG_NAME"
+          
+          INSTALLER_IDENTITY=""
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 || '' }}" ]; then
+            INSTALLER_IDENTITY=$(security find-identity -v "$KEYCHAIN_PATH" 2>/dev/null | grep "Developer ID Installer" | head -1 | awk -F '"' '{print $2}' || true)
+          fi
+          
+          if [ -n "$INSTALLER_IDENTITY" ]; then
+            INSTALLER_SIGNING_IDENTITY="$INSTALLER_IDENTITY" bash distribution/macos/build_pkg.sh \
+              "${{ steps.app.outputs.app_path }}" \
+              "$PKG_NAME" \
+              "1.0.0"
+          else
+            bash distribution/macos/build_pkg.sh \
+              "${{ steps.app.outputs.app_path }}" \
+              "$PKG_NAME" \
+              "1.0.0"
+          fi
+
+      - name: Notarize Packages (Apple Notary Service)
+        if: ${{ env.APPLE_ID != '' && env.APPLE_ID_PASSWORD != '' && env.APPLE_TEAM_ID != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_FILE="${{ steps.app.outputs.app_name }}-macOS-${{ matrix.architecture }}.pkg"
+          echo "Enviando $PKG_FILE a Apple Notarytool..."
+          xcrun notarytool submit "$PKG_FILE" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          
+          echo "Grapando ticket de notarización..."
+          xcrun stapler staple "$PKG_FILE"
+          xcrun stapler staple "${{ steps.app.outputs.app_path }}"
 
       - name: Package ZIP with ditto
         shell: bash
@@ -215,18 +296,19 @@ jobs:
           echo "✓ Validación de extracción superada: Bundle .app e indexador nativo intactos."
           rm -rf "$TEST_EXTRACT_DIR"
 
-      - name: Generate SHA-256 Checksum
+      - name: Generate SHA-256 Checksums
         shell: bash
         run: |
-          shasum -a 256 *.zip > checksums-macOS-${{ matrix.architecture }}.sha256
+          shasum -a 256 *.zip *.pkg > checksums-macOS-${{ matrix.architecture }}.sha256
           cat checksums-macOS-${{ matrix.architecture }}.sha256
 
-      - name: Upload macOS ZIP & SHA-256 to Artifacts
+      - name: Upload macOS Packages & Checksums to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BDJ-Studio-Search-Pro-macOS-${{ matrix.architecture }}
           path: |
             *.zip
+            *.pkg
             *.sha256
           if-no-files-found: error
           retention-days: 30

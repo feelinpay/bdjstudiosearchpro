@@ -39,6 +39,14 @@ impl RefinementStack {
         if self.stack.len() >= 16 {
             self.stack.remove(0);
         }
+        // Presupuesto de memoria para la pila: si el total de identificadores
+        // acumulados excede 8M enteros (~32 MB de RAM), se descartan los peldaños más viejos.
+        let mut total_cached: usize = self.stack.iter().map(|e| e.results.len()).sum();
+        total_cached += results.len();
+        while total_cached > 8_000_000 && self.stack.len() > 1 {
+            let removed = self.stack.remove(0);
+            total_cached -= removed.results.len();
+        }
         self.stack.push(RefinementEntry {
             query,
             ast,

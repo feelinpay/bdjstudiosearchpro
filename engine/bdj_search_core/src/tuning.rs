@@ -156,9 +156,9 @@ impl Tuning {
             },
             build_batch,
             max_cached_refine: match tier {
-                Tier::Low => 500_000,
-                Tier::Mid => 1_500_000,
-                Tier::High => 3_000_000,
+                Tier::Low => 2_000_000,
+                Tier::Mid => 3_000_000,
+                Tier::High => 5_000_000,
             },
         }
     }
@@ -336,17 +336,17 @@ mod tests {
     fn test_perfiles_tier_y_max_cached() {
         let low = Tuning::derive_for_tier(Tier::Low);
         assert_eq!(low.tier, Tier::Low);
-        assert_eq!(low.max_cached_refine, 500_000);
+        assert_eq!(low.max_cached_refine, 2_000_000);
         assert_eq!(low.chunk_size, 16_384);
 
         let mid = Tuning::derive_for_tier(Tier::Mid);
         assert_eq!(mid.tier, Tier::Mid);
-        assert_eq!(mid.max_cached_refine, 1_500_000);
+        assert_eq!(mid.max_cached_refine, 3_000_000);
         assert_eq!(mid.chunk_size, 32_768);
 
         let high = Tuning::derive_for_tier(Tier::High);
         assert_eq!(high.tier, Tier::High);
-        assert_eq!(high.max_cached_refine, 3_000_000);
+        assert_eq!(high.max_cached_refine, 5_000_000);
         assert_eq!(high.chunk_size, 65_536);
     }
 

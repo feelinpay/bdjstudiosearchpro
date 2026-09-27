@@ -20,3 +20,6 @@ windows = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Security_Authorization"
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

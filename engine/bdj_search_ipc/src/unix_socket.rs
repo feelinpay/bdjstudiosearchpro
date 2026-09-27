@@ -53,11 +53,28 @@ impl UnixSocketServer {
 
         let listener = UnixListener::bind(&p)?;
 
-        // Permisos 0666 para permitir conexión local desde cualquier usuario del sistema
+        // Permisos restringidos según contexto:
+        // - Root LaunchDaemon: grupo 'staff' (GID 20) y permisos 0660 (solo root y usuarios de consola).
+        // - Usuario estándar: permisos 0600 (solo el usuario actual).
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o666));
+            #[cfg(target_os = "macos")]
+            unsafe {
+                let uid = libc::getuid();
+                if uid == 0 {
+                    if let Ok(c_path) = std::ffi::CString::new(p.to_string_lossy().as_bytes()) {
+                        libc::chown(c_path.as_ptr(), 0, 20);
+                    }
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o660));
+                } else {
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            }
         }
 
         Ok(Self { listener, path: p })
@@ -65,7 +82,99 @@ impl UnixSocketServer {
 
     pub fn accept(&self) -> io::Result<UnixStream> {
         let (stream, _) = self.listener.accept()?;
+        #[cfg(unix)]
+        {
+            Self::verify_peer(&stream)?;
+        }
         Ok(stream)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn console_user_uid() -> Option<libc::uid_t> {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata("/dev/console").ok().map(|m| m.uid())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_peer_creds(stream: &UnixStream) -> io::Result<(libc::uid_t, libc::gid_t)> {
+        use std::os::unix::io::AsRawFd;
+        let mut euid: libc::uid_t = 0;
+        let mut egid: libc::gid_t = 0;
+        let res = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut euid, &mut egid) };
+        if res != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((euid, egid))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_peer_creds(stream: &UnixStream) -> io::Result<(libc::uid_t, libc::gid_t)> {
+        use std::os::unix::io::AsRawFd;
+        let mut ucred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let res = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut ucred as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
+        };
+        if res != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok((ucred.uid, ucred.gid))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    fn get_peer_creds(_stream: &UnixStream) -> io::Result<(libc::uid_t, libc::gid_t)> {
+        Ok((unsafe { libc::getuid() }, unsafe { libc::getgid() }))
+    }
+
+    #[cfg(unix)]
+    fn verify_peer(stream: &UnixStream) -> io::Result<()> {
+        let (euid, _egid) = Self::get_peer_creds(stream)?;
+        let my_uid = unsafe { libc::getuid() };
+
+        #[cfg(target_os = "macos")]
+        {
+            if my_uid == 0 {
+                // Root daemon: solo permitir a root (0) o al usuario conectado activamente a la consola gráfica (/dev/console)
+                let active_console = Self::console_user_uid();
+                if euid == 0 || active_console.is_some_and(|uid| uid == euid) {
+                    Ok(())
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "Conexión IPC no autorizada: el cliente no es el usuario de consola activo",
+                    ))
+                }
+            } else if euid == my_uid || euid == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "UID del cliente IPC no coincide",
+                ))
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if my_uid == 0 || euid == my_uid || euid == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "UID del cliente IPC no coincide",
+                ))
+            }
+        }
     }
 
     pub fn read_command(stream: &mut UnixStream) -> io::Result<IpcCommand> {

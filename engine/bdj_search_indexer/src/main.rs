@@ -345,6 +345,15 @@ impl IndexerService {
         }
     }
 
+    fn lock_overlay(&self) -> std::sync::MutexGuard<'_, OverlayIndex> {
+        self.overlay.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[cfg(windows)]
+    fn lock_watch(&self) -> std::sync::MutexGuard<'_, WatchState> {
+        self.watch.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Generación del `index.bdjx` que hay ahora mismo publicado.
     ///
     /// La capa se ancla a esta generación: la aplicación descarta una capa cuyo
@@ -877,7 +886,7 @@ impl IndexerService {
             let volumes = list_volumes();
             tracing::info!("Detectados {} volumenes logicos", volumes.len());
 
-            let mut watch = self.watch.lock().unwrap();
+            let mut watch = self.lock_watch();
             watch.volumes.clear();
             watch.frn_to_id.clear();
 
@@ -1033,7 +1042,7 @@ impl IndexerService {
         // La capa de cambios se ancla al indice publicado: sus identificadores
         // solo significan algo respecto a un base concreto.
         {
-            let mut overlay = self.overlay.lock().unwrap();
+            let mut overlay = self.lock_overlay();
             overlay.set_base_count(builder.count() as u32);
             overlay.builder.vol_table = builder.vol_table.clone();
         }
@@ -1102,7 +1111,7 @@ impl IndexerService {
 
         let mut applied = 0usize;
         let mut needs_rescan: Vec<String> = Vec::new();
-        let mut watch = self.watch.lock().unwrap();
+        let mut watch = self.lock_watch();
         let WatchState { volumes, frn_to_id, .. } = &mut *watch;
 
         // El base se abre una vez por sondeo: hace falta para reconstruir la
@@ -1110,7 +1119,7 @@ impl IndexerService {
         let base = MmapIndex::open(&self.index_path).ok();
         let base_view = base.as_ref().and_then(|m| m.view().ok());
 
-        let mut overlay = self.overlay.lock().unwrap();
+        let mut overlay = self.lock_overlay();
 
         for watcher in volumes.iter_mut() {
             let scanner = match UsnScanner::open(watcher.drive_letter) {
@@ -1181,7 +1190,7 @@ impl IndexerService {
         let mut nuevos_sin_diario: Vec<String> = Vec::new();
 
         {
-            let mut watch = self.watch.lock().unwrap();
+            let mut watch = self.lock_watch();
 
             // 1. Volumenes recien conectados.
             for vol in &current_vols {
@@ -1213,7 +1222,7 @@ impl IndexerService {
                 };
 
                 let vol_id = {
-                    let mut overlay = self.overlay.lock().unwrap();
+                    let mut overlay = self.lock_overlay();
                     overlay.builder.vol_table.add_or_update(
                         &vol.path,
                         &vol.label,
@@ -1222,7 +1231,7 @@ impl IndexerService {
                     )
                 };
                 let root_id = {
-                    let mut overlay = self.overlay.lock().unwrap();
+                    let mut overlay = self.lock_overlay();
                     overlay.add_entry(u32::MAX, "", true, false, false, vol_id, 0, 0, 0)
                 };
 
@@ -1283,7 +1292,7 @@ impl IndexerService {
     #[cfg(windows)]
     fn index_new_volume(&self, mount_prefix: &str) {
         let (vol_id, root_id) = {
-            let overlay = self.overlay.lock().unwrap();
+            let overlay = self.lock_overlay();
             let vol_id = overlay
                 .builder
                 .vol_table
@@ -1306,7 +1315,7 @@ impl IndexerService {
         tracing::info!("{mount_prefix}: leyendo contenido...");
         let entradas = bdj_search_fs::windows::scan_subtree(Path::new(mount_prefix), usize::MAX);
 
-        let mut overlay = self.overlay.lock().unwrap();
+        let mut overlay = self.lock_overlay();
         let mut ruta_a_id: HashMap<PathBuf, u32> = HashMap::new();
         ruta_a_id.insert(PathBuf::from(mount_prefix), root_id);
 
@@ -1446,7 +1455,7 @@ impl IndexerService {
         let mut idle_cycles: u32 = 0;
 
         let base_count = {
-            let overlay = self.overlay.lock().unwrap();
+            let overlay = self.lock_overlay();
             overlay.base_count as usize
         };
         // Reescribir un indice de 10 millones cuesta segundos; uno de 100.000,
@@ -1548,7 +1557,7 @@ impl IndexerService {
             }
 
             let (has_changes, too_big) = {
-                let overlay = self.overlay.lock().unwrap();
+                let overlay = self.lock_overlay();
                 (overlay.has_changes(), overlay.should_compact(base_count))
             };
 
@@ -1564,7 +1573,7 @@ impl IndexerService {
             generation += 1;
             let base = MmapIndex::open(&self.index_path).ok();
             let resultado = {
-                let mut overlay = self.overlay.lock().unwrap();
+                let mut overlay = self.lock_overlay();
                 overlay.compact(base.as_ref(), &self.index_path, generation)
             };
             match resultado {

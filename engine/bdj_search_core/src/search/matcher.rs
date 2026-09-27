@@ -66,9 +66,14 @@ impl SubstringMatcher {
                     return false;
                 }
                 
-                // Fast case-insensitive compare of the remainder
-                let candidate = &text[start..start + plen];
-                if Self::ascii_eq_ignore_case(candidate, p_slice) {
+                // Si el patrón es de un byte, memchr2 ya garantizó la coincidencia exacta
+                if plen == 1 {
+                    return true;
+                }
+
+                // Fast case-insensitive compare of the remainder (saltando byte 0 ya verificado)
+                let candidate = &text[start + 1..start + plen];
+                if Self::ascii_eq_ignore_case(candidate, &p_slice[1..]) {
                     return true;
                 }
                 offset = start + 1;
@@ -84,7 +89,14 @@ impl SubstringMatcher {
     fn ascii_eq_ignore_case(a: &[u8], b_lower: &[u8]) -> bool {
         debug_assert_eq!(a.len(), b_lower.len());
         for i in 0..a.len() {
-            if a[i].to_ascii_lowercase() != b_lower[i] {
+            let y = b_lower[i];
+            let x = a[i];
+            let eq = if y.is_ascii_lowercase() {
+                (x | 0x20) == y
+            } else {
+                x.to_ascii_lowercase() == y
+            };
+            if !eq {
                 return false;
             }
         }

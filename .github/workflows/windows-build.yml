@@ -1,0 +1,205 @@
+name: Build Windows
+
+# ============================================================
+# MODELO DE DISTRIBUCIÓN: DIRECTA Y FUERA DE TIENDAS
+# ============================================================
+# Todo el ecosistema BDJ Studio se distribuye directamente por el desarrollador.
+# Genera exclusivamente instaladores ejecutables e instalador Inno Setup para Windows (x64).
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout bdj_license_core (dzapataba/bdjstudiolicensecore)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: dzapataba/bdjstudiolicensecore
+          path: bdj_license_core
+          token: ${{ secrets.CORE_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Show environment
+        run: |
+          flutter --version
+          cargo --version
+          rustc --version
+
+      - name: Install flutter_rust_bridge_codegen
+        run: cargo install flutter_rust_bridge_codegen --version 2.13.0
+
+      - name: Link bdj_license_core and Install Flutter dependencies
+        shell: powershell
+        run: |
+          if (Test-Path "bdj_license_core") {
+            New-Item -ItemType Directory -Force -Path "../bdj_license_core" | Out-Null
+            Copy-Item -Recurse -Force "bdj_license_core\*" "../bdj_license_core\"
+            New-Item -ItemType Directory -Force -Path "../../bdj_license_core" | Out-Null
+            Copy-Item -Recurse -Force "bdj_license_core\*" "../../bdj_license_core\"
+          }
+          Set-Location frontend
+          flutter pub get
+
+      - name: Regenerate Flutter-Rust Bridge
+        shell: powershell
+        run: |
+          Set-Location frontend
+          flutter_rust_bridge_codegen generate
+
+      - name: Run Engine Tests & Clippy
+        shell: powershell
+        run: |
+          Set-Location engine
+          cargo test --workspace --release
+          cargo clippy --workspace -- -D warnings
+
+      - name: Compile Native Engine in Release
+        shell: powershell
+        run: |
+          Set-Location engine
+          cargo build --release -p bdj_search_ffi -p bdj_search_indexer
+
+      - name: Run Flutter Analyze & Tests
+        shell: powershell
+        run: |
+          Set-Location frontend
+          flutter analyze
+          flutter test
+
+      - name: Build Flutter Windows Application (Release)
+        shell: powershell
+        run: |
+          Set-Location frontend
+          flutter build windows --release
+
+      - name: Integrate Native Libraries into Application Bundle
+        shell: powershell
+        run: |
+          $ReleaseDir = "frontend\build\windows\x64\runner\Release"
+          $EngineRelease = "engine\target\release"
+          
+          if (-not (Test-Path $ReleaseDir)) {
+            throw "No se encontró el directorio de release de Flutter: $ReleaseDir"
+          }
+          
+          Copy-Item "$EngineRelease\bdj_search_ffi.dll" "$ReleaseDir\" -Force
+          Copy-Item "$EngineRelease\bdj_search_indexer.exe" "$ReleaseDir\" -Force
+          Write-Host "✓ Binarios nativos copiados exitosamente a $ReleaseDir"
+
+      - name: Sign Native Binaries (Optional)
+        id: sign-binaries
+        shell: powershell
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:CERT_BASE64) {
+            Write-Host "Importando certificado de firma de código para Windows..."
+            $CertBytes = [System.Convert]::FromBase64String($env:CERT_BASE64)
+            $CertPath = "$env:TEMP\codesign.pfx"
+            [System.IO.File]::WriteAllBytes($CertPath, $CertBytes)
+
+            $Signtool = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits" -Filter "signtool.exe" -Recurse | Select-Object -First 1).FullName
+            if (-not $Signtool) {
+              $Signtool = "signtool.exe"
+            }
+
+            $BinariesToSign = @(
+              "frontend\build\windows\x64\runner\Release\frontend.exe",
+              "frontend\build\windows\x64\runner\Release\bdj_search_ffi.dll",
+              "frontend\build\windows\x64\runner\Release\bdj_search_indexer.exe",
+              "engine\target\release\bdj_search_ffi.dll",
+              "engine\target\release\bdj_search_indexer.exe"
+            )
+
+            foreach ($bin in $BinariesToSign) {
+              if (Test-Path $bin) {
+                Write-Host "Firmando $bin..."
+                & $Signtool sign /f $CertPath /p $env:CERT_PWD /tr http://timestamp.digicert.com /td sha256 /fd sha256 $bin
+              }
+            }
+            Remove-Item -Force $CertPath
+            Write-Host "✓ Binarios firmados correctamente con certificado oficial."
+          } else {
+            Write-Host "Aviso: WINDOWS_CERTIFICATE_BASE64 no configurado en Secrets. Binarios compilados sin firma."
+          }
+
+      - name: Build Inno Setup Installer
+        shell: powershell
+        run: |
+          $Iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $Iscc)) {
+            $Iscc = "iscc"
+          }
+          Write-Host "Compilando instalador Inno Setup con $Iscc..."
+          & $Iscc distribution\installer.iss
+
+      - name: Sign Installer (Optional)
+        shell: powershell
+        env:
+          CERT_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          CERT_PWD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if ($env:CERT_BASE64) {
+            $Installer = (Get-ChildItem -Path "distribution" -Filter "BDJ_Studio_Search_Pro_Setup_*.exe" | Select-Object -First 1).FullName
+            if ($Installer) {
+              Write-Host "Firmando instalador $Installer..."
+              $CertBytes = [System.Convert]::FromBase64String($env:CERT_BASE64)
+              $CertPath = "$env:TEMP\installer_sign.pfx"
+              [System.IO.File]::WriteAllBytes($CertPath, $CertBytes)
+
+              $Signtool = (Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits" -Filter "signtool.exe" -Recurse | Select-Object -First 1).FullName
+              if (-not $Signtool) { $Signtool = "signtool.exe" }
+
+              & $Signtool sign /f $CertPath /p $env:CERT_PWD /tr http://timestamp.digicert.com /td sha256 /fd sha256 $Installer
+              Remove-Item -Force $CertPath
+              Write-Host "✓ Instalador firmado correctamente."
+            }
+          }
+
+      - name: Generate SHA-256 Checksums
+        shell: powershell
+        run: |
+          $Installers = Get-ChildItem -Path "distribution" -Filter "BDJ_Studio_Search_Pro_Setup_*.exe"
+          foreach ($file in $Installers) {
+            $hash = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLower()
+            $line = "$hash  $($file.Name)"
+            $line | Out-File -FilePath "$($file.FullName).sha256" -Encoding ascii
+            Write-Host "Checksum: $line"
+          }
+
+      - name: Upload Windows Installer to Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BDJ_Studio_Search_Pro_Windows_Setup
+          path: |
+            distribution/BDJ_Studio_Search_Pro_Setup_*.exe
+            distribution/BDJ_Studio_Search_Pro_Setup_*.exe.sha256
+          if-no-files-found: error
+          retention-days: 30

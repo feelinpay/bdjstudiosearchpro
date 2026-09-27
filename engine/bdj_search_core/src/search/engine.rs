@@ -387,7 +387,7 @@ impl Engine {
                 all.extend_from_slice(&c.ids);
             }
             key.sort(&mut all);
-            self.remember(trimmed, &ast, &all);
+            self.remember(trimmed, &ast, all.clone());
             return (
                 search_gen,
                 SearchResult {
@@ -420,7 +420,7 @@ impl Engine {
             for c in &chunks {
                 all.extend_from_slice(&c.ids);
             }
-            self.remember(trimmed, &ast, &all);
+            self.remember(trimmed, &ast, all);
         }
         drop(chunks);
 
@@ -443,13 +443,13 @@ impl Engine {
     }
 
     /// Guarda un resultado completo para poder refinar la siguiente pulsación.
-    fn remember(&self, query: &str, ast: &crate::query::QueryAst, ids: &[u32]) {
+    fn remember(&self, query: &str, ast: &crate::query::QueryAst, ids: Vec<u32>) {
         let max_refine = crate::tuning::Tuning::current().max_cached_refine;
         if ids.len() > max_refine {
             return;
         }
-        let mut stack = self.refine_stack.lock().unwrap();
-        stack.push(query.to_string(), ast.clone(), ids.to_vec());
+        let mut stack = self.refine_stack.lock().unwrap_or_else(|e| e.into_inner());
+        stack.push(query.to_string(), ast.clone(), ids);
     }
 
     /// Ordena y recorta un conjunto de identificadores ya conocido.
@@ -580,7 +580,7 @@ impl Engine {
         gen_id: u64,
     ) -> Vec<ChunkHits> {
         let threads = pool().map(|p| p.current_num_threads()).unwrap_or(1);
-        let c_chunk = (candidates.len() / (threads * 2)).clamp(1024, chunk_size());
+        let c_chunk = (candidates.len() / (threads * 2)).max(1024);
         en_el_grupo(|| {
         candidates
             .par_chunks(c_chunk)
