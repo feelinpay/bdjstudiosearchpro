@@ -81,6 +81,8 @@ jobs:
 
       - name: Latency budget (10M)
         shell: powershell
+        env:
+          BDJ_TIER: low
         run: |
           Set-Location engine
           cargo test --release -p bdj_search_core --test latency_budget_test -- --ignored --nocapture
