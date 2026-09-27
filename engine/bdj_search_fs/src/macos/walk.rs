@@ -311,8 +311,15 @@ mod tests {
         f1.write_all(&vec![b'A'; 1234]).unwrap();
         drop(f1);
 
-        // Fijar mtime a 2020-01-01 00:00:00 UTC (1_577_836_800) mediante libc::utimes
-        let target_mtime: libc::time_t = 1_577_836_800;
+        // Fijar mtime a 2035-01-01 00:00:00 UTC (2_051_222_400) mediante libc::utimes.
+        //
+        // La fecha va en el FUTURO a propósito. En macOS, `utimes` con una
+        // fecha de modificación ANTERIOR a la de creación arrastra también la
+        // fecha de creación hacia atrás (birthtime = mtime), y entonces crtime
+        // y mtime salen idénticos: la prueba no podría distinguir si los
+        // desplazamientos 36 (crtime) y 52 (modtime) están intercambiados.
+        // Con una fecha futura la creación se queda en «ahora».
+        let target_mtime: libc::time_t = 2_051_222_400;
         let times = [
             libc::timeval {
                 tv_sec: target_mtime,
@@ -381,16 +388,31 @@ mod tests {
                 b.name, b.ctime, fb.ctime
             );
 
-            // Si es archivo1.txt, verificar que mtime sea exactamente 2020 y ctime sea diferente
+            // archivo1.txt: mtime exacto en 2035 y crtime independiente («ahora»).
             if b.name == "archivo1.txt" {
-                assert_eq!(b.mtime, 1_577_836_800, "mtime debe ser exactamente el fijado en 2020");
-                assert_ne!(b.ctime, b.mtime, "ctime (creación) debe ser distinto de mtime (2020)");
+                assert_eq!(b.mtime, 2_051_222_400, "mtime debe ser exactamente el fijado en 2035");
+                assert_ne!(b.ctime, b.mtime, "ctime (creación) debe ser distinto de mtime (2035)");
             }
 
             // Verificar también contra std::fs::metadata
             let item_path = root.join(&b.name);
             let meta = fs::metadata(&item_path).unwrap();
             assert_eq!(b.is_dir, meta.is_dir());
+
+            // Comprobación independiente del fallback: cada fecha contra el
+            // campo que le corresponde en `metadata`. Si 36 y 52 estuvieran
+            // intercambiados, esto falla aunque bulk y fallback coincidieran.
+            let secs = |t: std::io::Result<std::time::SystemTime>| {
+                t.ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+            };
+            if let Some(m) = secs(meta.modified()) {
+                assert!((b.mtime as i64 - m).abs() <= 1, "mtime vs metadata para {}: {} != {}", b.name, b.mtime, m);
+            }
+            if let Some(c) = secs(meta.created()) {
+                assert!((b.ctime as i64 - c).abs() <= 1, "crtime vs metadata para {}: {} != {}", b.name, b.ctime, c);
+            }
             if !b.is_dir {
                 assert_eq!(b.size, meta.len());
             }
