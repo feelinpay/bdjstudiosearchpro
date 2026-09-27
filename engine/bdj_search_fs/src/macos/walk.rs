@@ -292,3 +292,77 @@ pub fn scan_subtree(root: &Path, max_depth: usize) -> Vec<MacFsEntry> {
 
     all_entries
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_getattrlistbulk_coincide_con_fallback_y_metadata() {
+        let temp = tempdir().expect("crear directorio temporal");
+        let root = temp.path();
+
+        // 1. Archivo regular con tamaño conocido (ej. 1234 bytes)
+        let file1_path = root.join("archivo1.txt");
+        let mut f1 = File::create(&file1_path).unwrap();
+        f1.write_all(&vec![b'A'; 1234]).unwrap();
+        drop(f1);
+
+        // 2. Archivo vacío (0 bytes)
+        let file2_path = root.join("vacio.bin");
+        File::create(&file2_path).unwrap();
+
+        // 3. Archivo oculto (comienza con .)
+        let hidden_path = root.join(".config_oculto");
+        let mut f_h = File::create(&hidden_path).unwrap();
+        f_h.write_all(b"secreto").unwrap();
+        drop(f_h);
+
+        // 4. Subcarpeta
+        let subdir_path = root.join("mi_subcarpeta");
+        fs::create_dir(&subdir_path).unwrap();
+
+        // Ejecutar ambos métodos
+        let bulk = scan_directory_bulk(root).expect("scan_directory_bulk debe funcionar en macOS");
+        let fallback = scan_directory_fallback(root);
+
+        assert_eq!(bulk.len(), 4, "debe encontrar exactamente 4 entradas");
+        assert_eq!(fallback.len(), 4, "fallback debe encontrar exactamente 4 entradas");
+
+        let mut bulk_sorted = bulk.clone();
+        bulk_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+        let mut fallback_sorted = fallback.clone();
+        fallback_sorted.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for (b, fb) in bulk_sorted.iter().zip(fallback_sorted.iter()) {
+            assert_eq!(b.name, fb.name, "los nombres deben coincidir");
+            assert_eq!(b.is_dir, fb.is_dir, "is_dir debe coincidir para {}", b.name);
+            assert_eq!(b.is_hidden, fb.is_hidden, "is_hidden debe coincidir para {}", b.name);
+            assert_eq!(b.size, fb.size, "el tamaño debe coincidir para {}", b.name);
+
+            // Las fechas mtime y ctime deben coincidir dentro de 1 segundo de resolución
+            assert!(
+                (b.mtime as i64 - fb.mtime as i64).abs() <= 1,
+                "mtime debe coincidir para {}: bulk={}, fb={}",
+                b.name, b.mtime, fb.mtime
+            );
+            assert!(
+                (b.ctime as i64 - fb.ctime as i64).abs() <= 1,
+                "ctime debe coincidir para {}: bulk={}, fb={}",
+                b.name, b.ctime, fb.ctime
+            );
+
+            // Verificar también contra std::fs::metadata
+            let item_path = root.join(&b.name);
+            let meta = fs::metadata(&item_path).unwrap();
+            assert_eq!(b.is_dir, meta.is_dir());
+            if !b.is_dir {
+                assert_eq!(b.size, meta.len());
+            }
+        }
+    }
+}

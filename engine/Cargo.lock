@@ -171,6 +171,7 @@ dependencies = [
  "libc",
  "rayon",
  "serde",
+ "tempfile",
  "tracing",
  "windows 0.59.0",
 ]
